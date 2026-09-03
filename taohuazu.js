@@ -1,5 +1,4 @@
 const cheerio = createCheerio()
-const CryptoJS = createCryptoJS()
 
 const UA =
     'Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1'
@@ -10,10 +9,10 @@ const headers = {
 }
 
 const appConfig = {
-    ver: 20260903,
+    ver: 2026090302,
     title: '桃花族',
-    // 旧域名 920ck.us 目前只返回浏览器 JavaScript 跳转页
-    site: 'https://556862.xyz',
+    // 556862.xyz 已把所有分类重定向到首页，当前有效域名为 556863.xyz
+    site: 'https://556863.xyz',
 }
 
 /**
@@ -112,7 +111,20 @@ async function getCards(ext) {
  * 解码播放接口返回的 Base64 地址。
  */
 function decodeBase64(text) {
-    return CryptoJS.enc.Base64.parse(text).toString(CryptoJS.enc.Utf8)
+    // 播放地址仅包含 ASCII 字符，内置解码可避免依赖客户端 CryptoJS 版本。
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+    const clean = String(text || '').replace(/[^A-Za-z0-9+/=]/g, '')
+    let result = ''
+    for (let index = 0; index < clean.length; index += 4) {
+        const a = alphabet.indexOf(clean[index])
+        const b = alphabet.indexOf(clean[index + 1])
+        const c = clean[index + 2] === '=' ? -1 : alphabet.indexOf(clean[index + 2])
+        const d = clean[index + 3] === '=' ? -1 : alphabet.indexOf(clean[index + 3])
+        result += String.fromCharCode((a << 2) | (b >> 4))
+        if (c >= 0) result += String.fromCharCode(((b & 15) << 4) | (c >> 2))
+        if (d >= 0) result += String.fromCharCode(((c & 3) << 6) | d)
+    }
+    return result
 }
 
 /**
@@ -164,7 +176,15 @@ async function getTracks(ext) {
             },
         )
 
-        const result = typeof response.data === 'string' ? argsify(response.data) : response.data
+        let result = response.data
+        if (typeof result === 'string') {
+            // 优先使用标准 JSON 解析，并兼容客户端提供的 argsify。
+            try {
+                result = JSON.parse(result)
+            } catch (_) {
+                result = argsify(result)
+            }
+        }
         if (!result || !result.ok || !result.u) {
             throw new Error(`播放接口返回异常：${JSON.stringify(result)}`)
         }
