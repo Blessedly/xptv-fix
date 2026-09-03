@@ -10,7 +10,7 @@ const headers = {
 }
 
 const appConfig = {
-    ver: 2026090301,
+    ver: 2026090302,
     title: 'xhamster_兔',
     site: 'https://zh.xhamster.com',
     tabs: [
@@ -79,36 +79,30 @@ function findObjects(value, predicate, result = []) {
 function parseCards(html) {
     const cards = []
     const seen = {}
-    const $ = cheerio.load(html)
+    const initials = parseInitials(html)
+    const layoutPage = initials && initials.layoutPage
+    const videoListProps = layoutPage && layoutPage.videoListProps
+    const primaryModels = videoListProps && videoListProps.videoThumbProps
 
-    $('.thumb-list__item[data-video-id]').each((_, element) => {
-        const id = $(element).attr('data-video-id')
-        const imageLink = $(element).find('a.video-thumb__image-container').first()
-        const href = imageLink.attr('href')
-        if (!id || !href || seen[id]) return
-
-        const image = imageLink.find('img.thumb-image-container__image').first()
-        const title = image.attr('alt') || $(element).find('.video-thumb-info__name').attr('title') || ''
-        const cover = image.attr('src') || image.attr('data-src') || ''
-        const views = $(element).find('.video-thumb-views').text().trim()
-        const duration = $(element).find('.thumb-image-container__duration').text().trim()
-        seen[id] = true
-        cards.push({
-            vod_id: String(id),
-            vod_name: title,
-            vod_pic: cover,
-            vod_remarks: views,
-            vod_duration: duration,
-            ext: { url: href },
+    // 主列表 JSON 含有全部卡片字段；DOM 后半部分通常只是懒加载占位符。
+    if (Array.isArray(primaryModels) && primaryModels.length) {
+        primaryModels.forEach((item) => {
+            const id = String(item.id)
+            if (!item.pageURL || !item.title || seen[id]) return
+            seen[id] = true
+            cards.push({
+                vod_id: id,
+                vod_name: item.title || item.titleLocalized || '',
+                vod_pic: item.thumbURL || item.imageURL || '',
+                vod_remarks: item.views == null ? '' : `${item.views} 观看次数`,
+                vod_duration: formatDuration(item.duration),
+                ext: { url: item.pageURL },
+            })
         })
-    })
-
-    // DOM 类名变化或服务端只渲染占位符时，回退到稳定的结构化字段。
-    if (!cards.length) {
-        const initials = parseInitials(html)
-        const models = findObjects(
-            initials,
-            (item) => item.id && item.pageURL && item.title && (item.thumbURL || item.imageURL),
+    } else if (initials) {
+        // 搜索等页面的层级可能变化，找不到标准路径时再递归查找。
+        const models = findObjects(initials, (item) =>
+            item.id && item.pageURL && item.title && (item.thumbURL || item.imageURL),
         )
         models.forEach((item) => {
             const id = String(item.id)
@@ -121,6 +115,32 @@ function parseCards(html) {
                 vod_remarks: item.views == null ? '' : `${item.views} 观看次数`,
                 vod_duration: formatDuration(item.duration),
                 ext: { url: item.pageURL },
+            })
+        })
+    }
+
+    // 没有内嵌 JSON 时才解析 DOM，避免把懒加载空卡片返回给客户端。
+    if (!cards.length) {
+        const $ = cheerio.load(html)
+        $('.thumb-list__item[data-video-id]').each((_, element) => {
+            const id = $(element).attr('data-video-id')
+            const imageLink = $(element).find('a.video-thumb__image-container').first()
+            const href = imageLink.attr('href')
+            const image = imageLink.find('img.thumb-image-container__image').first()
+            const title = image.attr('alt') || $(element).find('.video-thumb-info__name').attr('title') || ''
+            const cover = image.attr('src') || image.attr('data-src') || ''
+            if (!id || !href || !title || !cover || seen[id]) return
+
+            const views = $(element).find('.video-thumb-views').text().trim()
+            const duration = $(element).find('.thumb-image-container__duration').text().trim()
+            seen[id] = true
+            cards.push({
+                vod_id: String(id),
+                vod_name: title,
+                vod_pic: cover,
+                vod_remarks: views,
+                vod_duration: duration,
+                ext: { url: href },
             })
         })
     }
