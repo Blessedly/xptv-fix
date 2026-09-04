@@ -13,7 +13,7 @@ const htmlHeaders = {
 }
 
 const appConfig = {
-    ver: 2026090401,
+    ver: 2026090402,
     title: 'KRX18',
     // www.krx18.com 会跳转到该主域名，统一使用跳转后的地址可避免跨域重定向。
     site: 'https://krx18.com',
@@ -29,8 +29,6 @@ const appConfig = {
         { name: '美国', ui: 1, ext: { url: 'https://krx18.com/genre/usa/' } },
     ],
 }
-
-let challengeOpened = false
 
 /**
  * 返回扩展配置。
@@ -79,23 +77,7 @@ function isChallengePage(html) {
 }
 
 /**
- * 仅在确认遇到验证页时打开一次内置浏览器。
- */
-function openChallengePage(url) {
-    if (
-        challengeOpened ||
-        typeof $utils === 'undefined' ||
-        typeof $utils.openSafari !== 'function'
-    ) {
-        return
-    }
-
-    challengeOpened = true
-    $utils.openSafari(url, UA)
-}
-
-/**
- * 请求 KRX18 页面，并兼容客户端提供的 Cloudflare 请求方法。
+ * 请求 KRX18 页面；遇到验证页时只记录错误，不自动打开内置浏览器。
  */
 async function requestSite(url, referer = appConfig.site) {
     const target = absoluteUrl(url)
@@ -109,23 +91,11 @@ async function requestSite(url, referer = appConfig.site) {
         },
     }
 
-    try {
-        // 新版客户端若提供专用方法，则由它处理验证 Cookie；旧版继续使用普通请求。
-        const response =
-            typeof requestWithCloudflare === 'function'
-                ? await requestWithCloudflare(target, options)
-                : await $fetch.get(target, options)
-        if (isChallengePage(response.data)) {
-            openChallengePage(target)
-            throw new Error('网站返回 Cloudflare 验证页，完成验证后请重新加载')
-        }
-        return response
-    } catch (error) {
-        if (/403|Forbidden|Cloudflare|Just a moment|验证/i.test(String(error || ''))) {
-            openChallengePage(target)
-        }
-        throw error
+    const response = await $fetch.get(target, options)
+    if (isChallengePage(response.data)) {
+        throw new Error('网站返回 Cloudflare 验证页，已禁止自动打开内置浏览器')
     }
+    return response
 }
 
 /**
