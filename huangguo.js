@@ -4,7 +4,7 @@
 const UA =
     'Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Mobile/15E148 Safari/604.1'
 const SITE = 'https://huangguoai.com'
-const VERSION = 2026090402
+const VERSION = 2026090403
 const PLACEHOLDER = SITE + '/static/web/images/cover-placeholder.png'
 const IMAGE_PROXY = 'https://images.weserv.nl/'
 const IMAGE_BATCH_SIZE = 8
@@ -280,25 +280,35 @@ async function getCards(ext) {
     const page = Math.max(1, parseInt(ext.page, 10) || 1)
     try {
         let list = []
+        let pagecount = 1
         if (id === 'home') {
+            // 首页没有分页，后续页必须返回空列表，否则客户端会无限追加同一批内容。
+            if (page > 1) return jsonify({ list: [], page: page, pagecount: 1 })
             const html = await fetchHtml(SITE + '/')
             list = parseGridCards(html, true).slice(0, 30)
         } else if (id.indexOf('rank') !== -1) {
+            // 排行榜也是单页内容，禁止重复读取第一页。
+            if (page > 1) return jsonify({ list: [], page: page, pagecount: 1 })
             const html = await fetchHtml(SITE + '/' + id + '/')
             list = parseRanks(html)
         } else {
             const json = await fetchJson(SITE + '/api/videos/category/' + encodeURIComponent(id) + '?page=' + page)
-            const items = json && json.data && Array.isArray(json.data.items) ? json.data.items : []
-            list = items.map(apiItemToCard).filter(Boolean)
-            if (!list.length) {
+            const data = json && json.data
+            if (data && Array.isArray(data.items)) {
+                list = data.items.map(apiItemToCard).filter(Boolean)
+                const pages = parseInt(data.pagination && data.pagination.pages, 10)
+                pagecount = pages > 0 ? pages : list.length ? page + 1 : page
+            } else {
+                // 仅当 JSON 接口确实不可用时才回退 HTML；接口正常但末页为空时不能回退。
                 const url = SITE + '/' + id + '/' + (page > 1 ? page + '/' : '')
                 list = parseGridCards(await fetchHtml(url), false)
+                pagecount = list.length ? page + 1 : page
             }
         }
-        return jsonify({ list: await hydratePosters(list), page: page })
+        return jsonify({ list: await hydratePosters(list), page: page, pagecount: pagecount })
     } catch (e) {
         console.error('[huangguo] 获取列表失败:', e)
-        return jsonify({ list: [], page: page })
+        return jsonify({ list: [], page: page, pagecount: page })
     }
 }
 
@@ -374,14 +384,13 @@ async function search(ext) {
     ext = argsify(ext)
     const keyword = String(ext.text || ext.wd || ext.keyword || '').trim()
     const page = Math.max(1, parseInt(ext.page, 10) || 1)
-    if (!keyword) return jsonify({ list: [], page: page })
+    if (!keyword || page > 1) return jsonify({ list: [], page: page, pagecount: 1 })
     try {
-        const suffix = page > 1 ? page + '/' : ''
-        const url = SITE + '/search/video/' + encodeURIComponent(keyword) + '/' + suffix
+        const url = SITE + '/search/video/' + encodeURIComponent(keyword) + '/'
         const list = parseGridCards(await fetchHtml(url), false)
-        return jsonify({ list: await hydratePosters(list), page: page })
+        return jsonify({ list: await hydratePosters(list), page: page, pagecount: 1 })
     } catch (e) {
         console.error('[huangguo] 搜索失败:', e)
-        return jsonify({ list: [], page: page })
+        return jsonify({ list: [], page: page, pagecount: 1 })
     }
 }
