@@ -1,28 +1,19 @@
 // 黄果短剧修复版
-// 修复内容：分类改用站点 JSON 接口、封面在脚本内 AES 解密、搜索按真实页码请求并去重。
-
-const CryptoJS = createCryptoJS()
+// 修复内容：分类改用站点 JSON 接口、封面转换为普通 HTTPS 图片、搜索按真实页码请求并去重。
 
 const UA =
     'Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Mobile/15E148 Safari/604.1'
 const SITE = 'https://huangguoai.com'
-const VERSION = 2026090401
+const VERSION = 2026090402
 const PLACEHOLDER = SITE + '/static/web/images/cover-placeholder.png'
-const IMAGE_KEY = CryptoJS.enc.Utf8.parse('f5d965df75336270')
-const IMAGE_IV = CryptoJS.enc.Utf8.parse('97b60394abc2fbe1')
-const IMAGE_BATCH_SIZE = 4
+const IMAGE_PROXY = 'https://images.weserv.nl/'
+const IMAGE_BATCH_SIZE = 8
 const IMAGE_CACHE_LIMIT = 48
 
 const HEADERS = {
     'User-Agent': UA,
     Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'Accept-Language': 'zh-CN,zh;q=0.9',
-    Referer: SITE + '/',
-}
-
-const IMAGE_HEADERS = {
-    'User-Agent': UA,
-    Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
     Referer: SITE + '/',
 }
 
@@ -94,194 +85,35 @@ async function fetchJson(url) {
     }
 }
 
-// 把二进制响应统一转成字节数组，兼容 ArrayBuffer、Uint8Array 和 Buffer JSON。
-function toBytes(data) {
-    if (data == null) return null
-    if (data && data.type === 'Buffer' && Array.isArray(data.data)) {
-        return new Uint8Array(data.data)
-    }
-    if (Array.isArray(data)) return new Uint8Array(data)
-    if (typeof ArrayBuffer !== 'undefined' && data instanceof ArrayBuffer) {
-        return new Uint8Array(data)
-    }
-    if (
-        typeof ArrayBuffer !== 'undefined' &&
-        typeof ArrayBuffer.isView === 'function' &&
-        ArrayBuffer.isView(data)
-    ) {
-        return new Uint8Array(data.buffer, data.byteOffset || 0, data.byteLength)
-    }
-    if (typeof data === 'string') {
-        const source = data.replace(/^data:[^,]*,/, '')
-        if (/^[A-Za-z0-9+/\r\n]+={0,2}$/.test(source) && source.replace(/\s/g, '').length % 4 === 0) {
-            try {
-                return wordArrayToBytes(CryptoJS.enc.Base64.parse(source.replace(/\s/g, '')))
-            } catch (e) {}
-        }
-        const bytes = new Uint8Array(data.length)
-        for (let i = 0; i < data.length; i++) bytes[i] = data.charCodeAt(i) & 255
-        return bytes
-    }
-    if (data && typeof data.length === 'number') {
-        const bytes = new Uint8Array(data.length)
-        for (let i = 0; i < data.length; i++) bytes[i] = Number(data[i]) & 255
-        return bytes
-    }
-    return null
-}
-
-// 将字节数组转换为 CryptoJS WordArray。
-function bytesToWordArray(bytes, length) {
-    const size = length == null ? bytes.length : length
-    const words = []
-    for (let i = 0; i < size; i++) {
-        words[i >>> 2] = (words[i >>> 2] || 0) | ((bytes[i] & 255) << (24 - (i % 4) * 8))
-    }
-    return CryptoJS.lib.WordArray.create(words, size)
-}
-
-// 将 CryptoJS WordArray 还原为字节数组。
-function wordArrayToBytes(wordArray) {
-    const words = wordArray.words || []
-    const size = wordArray.sigBytes || 0
-    const bytes = new Uint8Array(size)
-    for (let i = 0; i < size; i++) {
-        bytes[i] = (words[i >>> 2] >>> (24 - (i % 4) * 8)) & 255
-    }
-    return bytes
-}
-
-// 判断二进制内容的真实图片类型。
-function imageMime(bytes) {
-    if (!bytes || bytes.length < 4) return ''
-    if (bytes[0] === 0xff && bytes[1] === 0xd8) return 'image/jpeg'
-    if (
-        bytes.length >= 8 &&
-        bytes[0] === 0x89 &&
-        bytes[1] === 0x50 &&
-        bytes[2] === 0x4e &&
-        bytes[3] === 0x47 &&
-        bytes[4] === 0x0d &&
-        bytes[5] === 0x0a &&
-        bytes[6] === 0x1a &&
-        bytes[7] === 0x0a
-    ) {
-        return 'image/png'
-    }
-    if (
-        bytes.length >= 12 &&
-        bytes[0] === 0x52 &&
-        bytes[1] === 0x49 &&
-        bytes[2] === 0x46 &&
-        bytes[3] === 0x46 &&
-        bytes[8] === 0x57 &&
-        bytes[9] === 0x45 &&
-        bytes[10] === 0x42 &&
-        bytes[11] === 0x50
-    ) {
-        return 'image/webp'
-    }
-    if (
-        bytes.length >= 6 &&
-        bytes[0] === 0x47 &&
-        bytes[1] === 0x49 &&
-        bytes[2] === 0x46 &&
-        bytes[3] === 0x38
-    ) {
-        return 'image/gif'
-    }
-    return ''
-}
-
-// 查找字节签名最后一次出现的位置。
-function lastIndexOfBytes(bytes, signature) {
-    for (let i = bytes.length - signature.length; i >= 0; i--) {
-        let matched = true
-        for (let j = 0; j < signature.length; j++) {
-            if (bytes[i + j] !== signature[j]) {
-                matched = false
-                break
-            }
-        }
-        if (matched) return i
-    }
-    return -1
-}
-
-// 去除 AES 填充与图片尾部多余字节，返回图片有效长度。
-function cleanImageLength(bytes, mime) {
-    let size = bytes.length
-    const padding = bytes[size - 1]
-    if (padding > 0 && padding <= 16 && padding <= size) {
-        let validPadding = true
-        for (let i = size - padding; i < size; i++) {
-            if (bytes[i] !== padding) {
-                validPadding = false
-                break
-            }
-        }
-        if (validPadding) size -= padding
-    }
-
-    const view = size === bytes.length ? bytes : bytes.subarray(0, size)
-    if (mime === 'image/jpeg') {
-        const end = lastIndexOfBytes(view, [0xff, 0xd9])
-        if (end !== -1) size = end + 2
-    } else if (mime === 'image/png') {
-        const end = lastIndexOfBytes(view, [0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82])
-        if (end !== -1) size = end + 8
-    }
-    return size
-}
-
-// 解密黄果 CDN 的 AES-128-CBC 密文并生成可直接显示的 Data URI。
-function decryptImageData(data) {
-    const encrypted = toBytes(data)
-    if (!encrypted || !encrypted.length) return ''
-
-    let plain = encrypted
-    let mime = imageMime(plain)
-    if (!mime && encrypted.length % 16 === 0) {
-        try {
-            const decrypted = CryptoJS.AES.decrypt(
-                { ciphertext: bytesToWordArray(encrypted) },
-                IMAGE_KEY,
-                { iv: IMAGE_IV, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.NoPadding }
-            )
-            plain = wordArrayToBytes(decrypted)
-            mime = imageMime(plain)
-        } catch (e) {
-            return ''
-        }
-    }
-    if (!mime) return ''
-
-    const size = cleanImageLength(plain, mime)
-    const base64 = CryptoJS.enc.Base64.stringify(bytesToWordArray(plain, size))
-    return 'data:' + mime + ';base64,' + base64
-}
-
-// 下载并解密单张封面；失败时使用站点的公开占位图，避免空白卡片。
-async function decryptPoster(url) {
-    const source = stableImageUrl(url)
-    if (!source || source === PLACEHOLDER || source.indexOf('cover-placeholder') !== -1) return PLACEHOLDER
-    if (imageCache.has(source)) return imageCache.get(source)
+// 从详情页读取站点提供的明文分享海报，并包装成客户端可直接加载的 HTTPS 图片。
+async function getPosterUrl(id) {
+    const cacheKey = String(id || '')
+    if (!cacheKey) return PLACEHOLDER
+    if (imageCache.has(cacheKey)) return imageCache.get(cacheKey)
 
     const task = (async function () {
         try {
-            const response = await $fetch.get(source, {
-                headers: IMAGE_HEADERS,
-                responseType: 'arraybuffer',
+            const response = await $fetch.get(SITE + '/detail/' + encodeURIComponent(cacheKey) + '/', {
+                headers: Object.assign({}, HEADERS, { 'User-Agent': 'Twitterbot/1.0' }),
                 timeout: 20000,
             })
-            return decryptImageData(response && response.data) || PLACEHOLDER
+            const html = response && response.data == null ? '' : String(response.data)
+            const first = html.match(
+                /<meta[^>]+(?:property|name)=["']og:image["'][^>]+content=["']([^"']+)["'][^>]*>/i
+            )
+            const second = html.match(
+                /<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']og:image["'][^>]*>/i
+            )
+            const exposed = decodeHtml(first ? first[1] : second ? second[1] : '')
+            if (!/^https?:\/\//i.test(exposed)) return PLACEHOLDER
+            return IMAGE_PROXY + '?url=' + encodeURIComponent(exposed) + '&w=360&output=jpg&q=85'
         } catch (e) {
-            console.error('[huangguo] 封面解密失败:', source, e)
+            console.error('[huangguo] 获取明文海报失败:', cacheKey, e)
             return PLACEHOLDER
         }
     })()
 
-    imageCache.set(source, task)
+    imageCache.set(cacheKey, task)
     if (imageCache.size > IMAGE_CACHE_LIMIT) {
         const firstKey = imageCache.keys().next().value
         imageCache.delete(firstKey)
@@ -289,11 +121,11 @@ async function decryptPoster(url) {
     return task
 }
 
-// 分批处理封面，降低手机同时下载大量图片时的内存和连接压力。
+// 分批获取明文海报地址，避免同时请求过多详情页。
 async function hydratePosters(list) {
     for (let start = 0; start < list.length; start += IMAGE_BATCH_SIZE) {
         const batch = list.slice(start, start + IMAGE_BATCH_SIZE)
-        const posters = await Promise.all(batch.map((item) => decryptPoster(item.vod_pic)))
+        const posters = await Promise.all(batch.map((item) => getPosterUrl(item.vod_id)))
         for (let i = 0; i < batch.length; i++) batch[i].vod_pic = posters[i]
     }
     return list
