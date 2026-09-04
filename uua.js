@@ -20,9 +20,10 @@ const mirrorSites = [
 ]
 
 let activeSite = mirrorSites[0]
+let challengeOpened = false
 
 const appConfig = {
-    ver: 2026090401,
+    ver: 2026090402,
     title: '有爱爱',
     // 保留字面量，便于通用检测脚本直接识别当前首选域名。
     site: 'https://www.uaa2610.com',
@@ -99,6 +100,22 @@ function isChallengePage(html) {
 }
 
 /**
+ * 只打开一次内置浏览器，让用户完成 Cloudflare 验证。
+ */
+function openChallengePage(url) {
+    if (
+        challengeOpened ||
+        typeof $utils === 'undefined' ||
+        typeof $utils.openSafari !== 'function'
+    ) {
+        return
+    }
+
+    challengeOpened = true
+    $utils.openSafari(url, UA)
+}
+
+/**
  * 为站内地址生成镜像候选，保留原路径和查询参数。
  */
 function buildCandidateUrls(target) {
@@ -122,6 +139,7 @@ function buildCandidateUrls(target) {
 async function requestHtml(target, refererPath = '/') {
     const candidates = buildCandidateUrls(target)
     let lastError = null
+    let challengeUrl = ''
 
     for (const url of candidates) {
         const site = getOrigin(url)
@@ -136,6 +154,7 @@ async function requestHtml(target, refererPath = '/') {
                 },
             })
             if (isChallengePage(data)) {
+                if (!challengeUrl) challengeUrl = url
                 lastError = new Error(`${site} 返回 Cloudflare 验证页`)
                 continue
             }
@@ -144,10 +163,16 @@ async function requestHtml(target, refererPath = '/') {
             appConfig.site = site
             return { data, url, site }
         } catch (error) {
+            // 某些运行环境会直接把 403 当成异常，因此同时检查错误文字。
+            if (!challengeUrl && /403|Forbidden|Cloudflare|Just a moment/i.test(String(error || ''))) {
+                challengeUrl = url
+            }
             lastError = error
         }
     }
 
+    // 所有镜像都失败后再打开验证页，避免切换线路时连续弹出多个网页。
+    if (challengeUrl) openChallengePage(challengeUrl)
     throw lastError || new Error('全部官方线路均无法访问')
 }
 
