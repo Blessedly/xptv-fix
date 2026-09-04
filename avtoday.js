@@ -10,7 +10,7 @@ const headers = {
 }
 
 const appConfig = {
-    ver: 2026090301,
+    ver: 2026090401,
     title: 'avtoday',
     site: 'https://avtoday.io',
 }
@@ -198,7 +198,6 @@ async function getTracks(ext) {
                             pan: '',
                             ext: {
                                 url: absoluteUrl(playMatch[1]),
-                                playerUrl,
                             },
                         },
                     ],
@@ -217,15 +216,14 @@ async function getTracks(ext) {
 async function getPlayinfo(ext) {
     ext = argsify(ext)
     const url = absoluteUrl(ext.url)
-    const referer = absoluteUrl(ext.playerUrl) || `${appConfig.site}/`
 
     return jsonify({
         urls: [url],
         headers: [
             {
                 'User-Agent': UA,
-                Referer: referer,
-                Origin: appConfig.site,
+                // 固定站点来源页对 m3u8 和跨域分片均有效，也避免查询参数在客户端中被截断。
+                Referer: `${appConfig.site}/`,
             },
         ],
     })
