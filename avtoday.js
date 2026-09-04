@@ -9,8 +9,11 @@ const headers = {
     'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
 }
 
+// 使用 Shadowrocket 修复模块时保持为空；未使用模块时可填入已部署的 Worker 地址。
+const PLAY_PROXY = ''
+
 const appConfig = {
-    ver: 2026090401,
+    ver: 2026090402,
     title: 'avtoday',
     site: 'https://avtoday.io',
 }
@@ -43,6 +46,16 @@ function cleanText(text) {
         .replace(/\u00a0/g, ' ')
         .replace(/\s+/g, ' ')
         .trim()
+}
+
+/**
+ * 根据代理配置生成客户端可以直接播放的媒体地址。
+ */
+function getPlayableUrl(url) {
+    const mediaUrl = absoluteUrl(url)
+    const proxy = String(PLAY_PROXY || '').replace(/\/+$/, '')
+    if (!mediaUrl || !proxy) return mediaUrl
+    return `${proxy}/proxy?url=${encodeURIComponent(mediaUrl)}`
 }
 
 /**
@@ -187,6 +200,7 @@ async function getTracks(ext) {
         })
         const playMatch = String(playerResponse.data).match(/m3u8_url\s*=\s*['"]([^'"]+)['"]/i)
         if (!playMatch || !playMatch[1]) throw new Error('播放器页没有找到 m3u8_url')
+        const useProxy = Boolean(String(PLAY_PROXY || '').trim())
 
         return jsonify({
             list: [
@@ -197,7 +211,8 @@ async function getTracks(ext) {
                             name: '播放',
                             pan: '',
                             ext: {
-                                url: absoluteUrl(playMatch[1]),
+                                url: getPlayableUrl(playMatch[1]),
+                                useProxy,
                             },
                         },
                     ],
@@ -216,16 +231,16 @@ async function getTracks(ext) {
 async function getPlayinfo(ext) {
     ext = argsify(ext)
     const url = absoluteUrl(ext.url)
+    const playHeaders = { 'User-Agent': UA }
+
+    if (!ext.useProxy) {
+        // 直连模式仍保留来源页；代理模式已由 Worker 在服务端补齐该请求头。
+        playHeaders.Referer = `${appConfig.site}/`
+    }
 
     return jsonify({
         urls: [url],
-        headers: [
-            {
-                'User-Agent': UA,
-                // 固定站点来源页对 m3u8 和跨域分片均有效，也避免查询参数在客户端中被截断。
-                Referer: `${appConfig.site}/`,
-            },
-        ],
+        headers: [playHeaders],
     })
 }
 
