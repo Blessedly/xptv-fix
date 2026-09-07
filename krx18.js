@@ -13,7 +13,7 @@ const htmlHeaders = {
 }
 
 const appConfig = {
-    ver: 2026090701,
+    ver: 2026090702,
     title: 'KRX18',
     // www.krx18.com 会跳转到该主域名，统一使用跳转后的地址可避免跨域重定向。
     site: 'https://krx18.com',
@@ -231,6 +231,100 @@ async function requestEmbedUrl(option, detailUrl) {
     return absoluteUrl(result && result.embed_url ? result.embed_url : '', apiUrl)
 }
 
+const playKrx18Keys = {
+    idFile: 'jcLycoRJT6OWjoWspgLMOZwS3aSS0lEn',
+    idUser: 'PZZ3J3LDbLT0GY7qSA5wW5vchqgpO36O',
+    request: 'vlVbUQhkOhoSfyteyzGeeDzU0BHoeTyZ',
+    response: 'oJwmvmVBajMaRCTklxbfjavpQO7SZpsL',
+    signature: 'KRWN3AdgmxEMcd2vLN1ju9qKe8Feco5h',
+}
+
+/**
+ * 解密播放器使用的 OpenSSL Salted__ 十六进制密文。
+ */
+function decryptOpenSslHex(cipherHex, password) {
+    const bytes = CryptoJS.enc.Hex.parse(String(cipherHex || ''))
+    const base64 = CryptoJS.enc.Base64.stringify(bytes)
+    return CryptoJS.AES.decrypt(base64, password).toString(CryptoJS.enc.Utf8)
+}
+
+/**
+ * 按播放器规则生成 OpenSSL Salted__ 十六进制密文。
+ */
+function encryptOpenSslHex(text, password) {
+    const base64 = CryptoJS.AES.encrypt(String(text || ''), password).toString()
+    return CryptoJS.enc.Base64.parse(base64).toString(CryptoJS.enc.Hex)
+}
+
+/**
+ * 通过 play.playkrx18.site 的站内播放接口取得真实 HLS 地址。
+ */
+async function resolvePlayKrx18(embedUrl, detailUrl) {
+    const playOrigin = getOrigin(embedUrl)
+    const { data } = await $fetch.get(embedUrl, {
+        headers: {
+            ...htmlHeaders,
+            Referer: detailUrl,
+            Origin: getOrigin(detailUrl),
+            'Sec-Fetch-Dest': 'iframe',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'cross-site',
+        },
+    })
+    const html = String(data || '')
+    const readConstant = (name) => {
+        const match = html.match(new RegExp(`const\\s+${name}\\s*=\\s*["']([^"']+)["']`))
+        return match ? match[1] : ''
+    }
+    const idFileEncrypted = readConstant('idfile_enc')
+    const idUserEncrypted = readConstant('idUser_enc')
+    const apiBase = readConstant('DOMAIN_API')
+    if (!idFileEncrypted || !idUserEncrypted || !apiBase) {
+        throw new Error('播放页缺少加密参数，可能被防盗链拦截')
+    }
+
+    const requestBody = {
+        idfile: decryptOpenSslHex(idFileEncrypted, playKrx18Keys.idFile),
+        iduser: decryptOpenSslHex(idUserEncrypted, playKrx18Keys.idUser),
+        domain_play: getOrigin(detailUrl),
+        platform: 'iPhone',
+        hlsSupport: false,
+        jwplayer: {},
+    }
+    if (!requestBody.idfile || !requestBody.iduser) {
+        throw new Error('播放页 ID 解密失败')
+    }
+
+    const encrypted = encryptOpenSslHex(JSON.stringify(requestBody), playKrx18Keys.request)
+    const signature = CryptoJS.MD5(`${encrypted}${playKrx18Keys.signature}`).toString()
+    const response = await $fetch.post(
+        `${String(apiBase).replace(/\/$/, '')}/playiframe`,
+        { data: `${encrypted}|${signature}` },
+        {
+            headers: {
+                ...htmlHeaders,
+                Accept: 'application/json, text/javascript, */*; q=0.01',
+                Referer: embedUrl,
+                Origin: playOrigin,
+                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                'X-Requested-With': 'XMLHttpRequest',
+            },
+        }
+    )
+    const result = parseJsonData(response.data)
+    if (!result || Number(result.status) !== 1 || !result.data) {
+        throw new Error(`播放接口返回异常：${result && result.status ? result.status : '无状态'}`)
+    }
+
+    const playlist = decryptOpenSslHex(result.data, playKrx18Keys.response)
+    if (!/^https?:\/\//i.test(playlist)) throw new Error('HLS 地址解密失败')
+    return {
+        url: playlist,
+        referer: embedUrl,
+        origin: playOrigin,
+    }
+}
+
 /**
  * 使用站点播放器相同的 AES-CTR 规则解密 Abyss 媒体配置。
  */
@@ -301,7 +395,7 @@ async function resolveAbyssSources(embedUrl) {
 }
 
 /**
- * 加载详情页、解析服务器，并生成可直接播放的完整 MP4 线路。
+ * 加载详情页、解析服务器，并生成可直接播放的 HLS 或完整媒体线路。
  */
 async function getTracks(ext) {
     ext = argsify(ext)
@@ -347,21 +441,22 @@ async function getTracks(ext) {
                     continue
                 }
 
-                if (/mov18plus\.cloud|abyss/i.test(embedUrl)) {
-                    const sources = await resolveAbyssSources(embedUrl)
-                    sources.forEach((source) => {
-                        if (seen[source.url]) return
+                if (/play\.playkrx18\.site\/play\//i.test(embedUrl)) {
+                    const source = await resolvePlayKrx18(embedUrl, detailUrl)
+                    if (!seen[source.url]) {
                         seen[source.url] = true
                         tracks.push({
-                            name: `${option.name} · ${source.name}`,
+                            name: option.name,
                             pan: '',
-                            ext: {
-                                url: source.url,
-                                referer: embedUrl,
-                                origin: getOrigin(embedUrl),
-                            },
+                            ext: source,
                         })
-                    })
+                    }
+                    continue
+                }
+
+                if (/mov18plus\.cloud|abyss/i.test(embedUrl)) {
+                    // Abyss 返回的地址仍需 Service Worker 在线解密，直接交给原生播放器会永久加载。
+                    $print(`KRX18 已跳过不兼容的加密线路：${option.name}`)
                 }
             } catch (error) {
                 // 单条服务器失效时继续尝试其余服务器，避免整个详情页无结果。
