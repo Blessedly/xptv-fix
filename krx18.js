@@ -13,7 +13,7 @@ const htmlHeaders = {
 }
 
 const appConfig = {
-    ver: 2026090702,
+    ver: 2026090704,
     title: 'KRX18',
     // www.krx18.com 会跳转到该主域名，统一使用跳转后的地址可避免跨域重定向。
     site: 'https://krx18.com',
@@ -425,6 +425,26 @@ async function getTracks(ext) {
         })
 
         for (const option of options) {
+            if (String(option.number) === '1') {
+                // Server 1 先进入线路列表，Dooplay 地址和 HLS 均延迟到点击播放时解析。
+                const trackKey = `dooplay:${option.post}:${option.type}:${option.number}`
+                if (!seen[trackKey]) {
+                    seen[trackKey] = true
+                    tracks.push({
+                        name: option.name || 'Server 1',
+                        pan: '',
+                        ext: {
+                            resolver: 'playkrx18',
+                            detailUrl,
+                            post: option.post,
+                            number: option.number,
+                            type: option.type,
+                        },
+                    })
+                }
+                continue
+            }
+
             try {
                 const embedUrl = await requestEmbedUrl(option, detailUrl)
                 if (!embedUrl) continue
@@ -442,15 +462,19 @@ async function getTracks(ext) {
                 }
 
                 if (/play\.playkrx18\.site\/play\//i.test(embedUrl)) {
-                    const source = await resolvePlayKrx18(embedUrl, detailUrl)
-                    if (!seen[source.url]) {
-                        seen[source.url] = true
-                        tracks.push({
-                            name: option.name,
-                            pan: '',
-                            ext: source,
-                        })
-                    }
+                    // 先返回线路，避免预解析失败时整个播放器入口消失。
+                    const trackKey = `playkrx18:${embedUrl}`
+                    if (seen[trackKey]) continue
+                    seen[trackKey] = true
+                    tracks.push({
+                        name: option.name || 'Server 1',
+                        pan: '',
+                        ext: {
+                            resolver: 'playkrx18',
+                            embedUrl,
+                            detailUrl,
+                        },
+                    })
                     continue
                 }
 
@@ -481,6 +505,34 @@ async function getTracks(ext) {
  */
 async function getPlayinfo(ext) {
     ext = argsify(ext)
+    if (ext.resolver === 'playkrx18') {
+        // 点击线路后再调用播放接口，此时即使解析失败也不会影响线路页面展示。
+        const embedUrl =
+            ext.embedUrl ||
+            (await requestEmbedUrl(
+                {
+                    post: ext.post,
+                    number: ext.number,
+                    type: ext.type || 'movie',
+                },
+                ext.detailUrl
+            ))
+        if (!/play\.playkrx18\.site\/play\//i.test(embedUrl)) {
+            throw new Error('Server 1 未返回有效的播放页地址')
+        }
+        const source = await resolvePlayKrx18(embedUrl, ext.detailUrl)
+        return jsonify({
+            urls: [source.url],
+            headers: [
+                {
+                    'User-Agent': UA,
+                    Referer: source.referer,
+                    Origin: source.origin,
+                },
+            ],
+        })
+    }
+
     return jsonify({
         urls: [ext.url],
         headers: [
