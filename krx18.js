@@ -13,7 +13,7 @@ const htmlHeaders = {
 }
 
 const appConfig = {
-    ver: 2026090402,
+    ver: 2026090701,
     title: 'KRX18',
     // www.krx18.com 会跳转到该主域名，统一使用跳转后的地址可避免跨域重定向。
     site: 'https://krx18.com',
@@ -67,12 +67,13 @@ function cleanText(text) {
 
 /**
  * 判断响应是否为 Cloudflare 人机验证页面。
+ * 正常页面也可能加载 challenge-platform 监测脚本，因此只匹配验证页的明确标志。
  */
 function isChallengePage(html) {
     const text = String(html || '')
     return (
         /<title>\s*(?:Just a moment|Attention Required|请稍候)/i.test(text) ||
-        /challenge-platform|cf-chl-|cf-mitigated|Performing security verification/i.test(text)
+        /window\._cf_chl_opt\b|id=["']challenge-form["']|cf-error-details/i.test(text)
     )
 }
 
