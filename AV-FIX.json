@@ -1,0 +1,52 @@
+{
+    "sites": [
+        {
+            "name": "91Jav（修）",
+            "type": 3,
+            "api": "csp_blessedly_91jav",
+            "ext": "https://raw.githubusercontent.com/Blessedly/xptv-fix/refs/heads/main/91jav.js"
+        },
+        {
+            "name": "avtoday（修）",
+            "type": 3,
+            "api": "csp_blessedly_avtoday",
+            "ext": "https://raw.githubusercontent.com/Blessedly/xptv-fix/refs/heads/main/avtoday.js"
+        },
+        {
+            "name": "黄果短剧（修）",
+            "type": 3,
+            "api": "csp_blessedly_huangguo",
+            "ext": "https://raw.githubusercontent.com/Blessedly/xptv-fix/refs/heads/main/huangguo.js"
+        },
+        {
+            "name": "javxx（修）",
+            "type": 3,
+            "api": "csp_blessedly_javxx",
+            "ext": "https://raw.githubusercontent.com/Blessedly/xptv-fix/refs/heads/main/javxx.js"
+        },
+        {
+            "name": "KRX18（新）",
+            "type": 3,
+            "api": "csp_blessedly_krx18",
+            "ext": "https://raw.githubusercontent.com/Blessedly/xptv-fix/refs/heads/main/krx18.js"
+        },
+        {
+            "name": "桃花族（修）",
+            "type": 3,
+            "api": "csp_blessedly_taohuazu",
+            "ext": "https://raw.githubusercontent.com/Blessedly/xptv-fix/refs/heads/main/taohuazu.js"
+        },
+        {
+            "name": "有爱爱（修）",
+            "type": 3,
+            "api": "csp_blessedly_uua",
+            "ext": "https://raw.githubusercontent.com/Blessedly/xptv-fix/refs/heads/main/uua.js"
+        },
+        {
+            "name": "xhamster（修）",
+            "type": 3,
+            "api": "csp_blessedly_xhamster_tu",
+            "ext": "https://raw.githubusercontent.com/Blessedly/xptv-fix/refs/heads/main/xhamster_tu.js"
+        }
+    ]
+}
