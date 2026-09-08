@@ -12,8 +12,11 @@ const htmlHeaders = {
     Pragma: 'no-cache',
 }
 
+// Worker 只代取播放器页面和加密接口，视频媒体始终由手机直接读取。
+const PLAY_PROXY = 'https://krx18-control.blessedlymm.workers.dev'
+
 const appConfig = {
-    ver: 2026090704,
+    ver: 2026090812,
     title: 'KRX18',
     // www.krx18.com 会跳转到该主域名，统一使用跳转后的地址可避免跨域重定向。
     site: 'https://krx18.com',
@@ -34,7 +37,25 @@ const appConfig = {
  * 返回扩展配置。
  */
 async function getConfig() {
+    await traceRuntime('getConfig')
     return jsonify(appConfig)
+}
+
+/**
+ * 向诊断代理记录 XPTV 实际调用到的脚本入口；失败时不影响正常功能。
+ */
+async function traceRuntime(stage, detail = '') {
+    const proxy = String(PLAY_PROXY || '').replace(/\/+$/, '')
+    // 永久 Worker 不保存诊断日志，避免播放过程产生多余的公网请求。
+    if (!proxy || /\.workers\.dev$/i.test(proxy)) return
+    try {
+        await $fetch.get(
+            `${proxy}/trace?stage=${encodeURIComponent(stage)}&detail=${encodeURIComponent(detail)}&t=${Date.now()}`,
+            { headers: { 'User-Agent': UA, 'Cache-Control': 'no-cache' } }
+        )
+    } catch (_) {
+        // 诊断请求不得阻断列表或播放流程。
+    }
 }
 
 /**
@@ -63,6 +84,18 @@ function absoluteUrl(url, base = appConfig.site) {
  */
 function cleanText(text) {
     return String(text || '').replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * 根据代理配置生成只代取 M3U8 文本的播放地址。
+ */
+function getPlayableUrl(url, referer) {
+    const playlistUrl = String(url || '').trim()
+    const proxy = String(PLAY_PROXY || '').replace(/\/+$/, '')
+    if (!playlistUrl || !proxy) return playlistUrl
+    return `${proxy}/playlist?url=${encodeURIComponent(playlistUrl)}&referer=${encodeURIComponent(
+        referer || ''
+    )}`
 }
 
 /**
@@ -252,8 +285,22 @@ function decryptOpenSslHex(cipherHex, password) {
  * 按播放器规则生成 OpenSSL Salted__ 十六进制密文。
  */
 function encryptOpenSslHex(text, password) {
-    const base64 = CryptoJS.AES.encrypt(String(text || ''), password).toString()
-    return CryptoJS.enc.Base64.parse(base64).toString(CryptoJS.enc.Hex)
+    const plainText = String(text || '')
+    // XPTV 沙箱没有原生随机模块，使用请求内容和时间生成每次不同的 8 字节盐。
+    const saltDigest = CryptoJS.MD5(`${Date.now()}:${plainText}:${password}`)
+    const salt = CryptoJS.lib.WordArray.create(saltDigest.words.slice(0, 2), 8)
+    const derived = CryptoJS.kdf.OpenSSL.execute(password, 8, 4, salt)
+    const encrypted = CryptoJS.AES.encrypt(plainText, derived.key, {
+        iv: derived.iv,
+        mode: CryptoJS.mode.CBC,
+        padding: CryptoJS.pad.Pkcs7,
+    })
+
+    // CryptoJS 密码模式的输出格式为 Salted__ + 8 字节盐 + AES 密文。
+    return CryptoJS.enc.Hex.parse('53616c7465645f5f')
+        .concat(salt)
+        .concat(encrypted.ciphertext)
+        .toString(CryptoJS.enc.Hex)
 }
 
 /**
@@ -261,7 +308,12 @@ function encryptOpenSslHex(text, password) {
  */
 async function resolvePlayKrx18(embedUrl, detailUrl) {
     const playOrigin = getOrigin(embedUrl)
-    const { data } = await $fetch.get(embedUrl, {
+    const proxy = String(PLAY_PROXY || '').replace(/\/+$/, '')
+    const playerPageUrl = proxy
+        ? `${proxy}/player-page?url=${encodeURIComponent(embedUrl)}&referer=${encodeURIComponent(detailUrl)}`
+        : embedUrl
+    await traceRuntime('resolveStart', playOrigin)
+    const { data } = await $fetch.get(playerPageUrl, {
         headers: {
             ...htmlHeaders,
             Referer: detailUrl,
@@ -272,6 +324,7 @@ async function resolvePlayKrx18(embedUrl, detailUrl) {
         },
     })
     const html = String(data || '')
+    await traceRuntime('playPageLoaded', `${html.length}`)
     const readConstant = (name) => {
         const match = html.match(new RegExp(`const\\s+${name}\\s*=\\s*["']([^"']+)["']`))
         return match ? match[1] : ''
@@ -282,6 +335,7 @@ async function resolvePlayKrx18(embedUrl, detailUrl) {
     if (!idFileEncrypted || !idUserEncrypted || !apiBase) {
         throw new Error('播放页缺少加密参数，可能被防盗链拦截')
     }
+    await traceRuntime('playConstantsReady', getOrigin(apiBase))
 
     const requestBody = {
         idfile: decryptOpenSslHex(idFileEncrypted, playKrx18Keys.idFile),
@@ -294,11 +348,16 @@ async function resolvePlayKrx18(embedUrl, detailUrl) {
     if (!requestBody.idfile || !requestBody.iduser) {
         throw new Error('播放页 ID 解密失败')
     }
+    await traceRuntime('playIdsReady', `${requestBody.idfile.length}/${requestBody.iduser.length}`)
 
     const encrypted = encryptOpenSslHex(JSON.stringify(requestBody), playKrx18Keys.request)
     const signature = CryptoJS.MD5(`${encrypted}${playKrx18Keys.signature}`).toString()
+    const apiUrl = `${String(apiBase).replace(/\/$/, '')}/playiframe`
+    const requestApiUrl = proxy
+        ? `${proxy}/play-api?url=${encodeURIComponent(apiUrl)}&referer=${encodeURIComponent(embedUrl)}`
+        : apiUrl
     const response = await $fetch.post(
-        `${String(apiBase).replace(/\/$/, '')}/playiframe`,
+        requestApiUrl,
         { data: `${encrypted}|${signature}` },
         {
             headers: {
@@ -312,12 +371,14 @@ async function resolvePlayKrx18(embedUrl, detailUrl) {
         }
     )
     const result = parseJsonData(response.data)
+    await traceRuntime('playApiResponse', `${result && result.status}/${result && result.type}`)
     if (!result || Number(result.status) !== 1 || !result.data) {
         throw new Error(`播放接口返回异常：${result && result.status ? result.status : '无状态'}`)
     }
 
     const playlist = decryptOpenSslHex(result.data, playKrx18Keys.response)
     if (!/^https?:\/\//i.test(playlist)) throw new Error('HLS 地址解密失败')
+    await traceRuntime('playlistReady', getOrigin(playlist))
     return {
         url: playlist,
         referer: embedUrl,
@@ -399,6 +460,7 @@ async function resolveAbyssSources(embedUrl) {
  */
 async function getTracks(ext) {
     ext = argsify(ext)
+    await traceRuntime('getTracks', ext.url || '')
     const detailUrl = absoluteUrl(ext.url)
     const tracks = []
     const seen = {}
@@ -505,32 +567,43 @@ async function getTracks(ext) {
  */
 async function getPlayinfo(ext) {
     ext = argsify(ext)
+    await traceRuntime('getPlayinfo', ext.resolver || ext.url || 'empty')
     if (ext.resolver === 'playkrx18') {
-        // 点击线路后再调用播放接口，此时即使解析失败也不会影响线路页面展示。
-        const embedUrl =
-            ext.embedUrl ||
-            (await requestEmbedUrl(
-                {
-                    post: ext.post,
-                    number: ext.number,
-                    type: ext.type || 'movie',
-                },
-                ext.detailUrl
-            ))
-        if (!/play\.playkrx18\.site\/play\//i.test(embedUrl)) {
-            throw new Error('Server 1 未返回有效的播放页地址')
+        try {
+            // 点击线路后再调用播放接口，此时即使解析失败也不会影响线路页面展示。
+            const embedUrl =
+                ext.embedUrl ||
+                (await requestEmbedUrl(
+                    {
+                        post: ext.post,
+                        number: ext.number,
+                        type: ext.type || 'movie',
+                    },
+                    ext.detailUrl
+                ))
+            await traceRuntime('embedUrlReady', getOrigin(embedUrl))
+            if (!/play\.playkrx18\.site\/play\//i.test(embedUrl)) {
+                throw new Error('Server 1 未返回有效的播放页地址')
+            }
+            const source = await resolvePlayKrx18(embedUrl, ext.detailUrl)
+            // Worker 只代取与出口绑定的 M3U8 文本；清单中的视频分片保持上游地址，
+            // 由手机直接读取，不经过电脑或 Worker。
+            const playableUrl = getPlayableUrl(source.url, source.referer)
+            await traceRuntime('getPlayinfoReturn', getOrigin(playableUrl))
+            return jsonify({
+                urls: [playableUrl],
+                headers: [
+                    {
+                        'User-Agent': UA,
+                        Referer: source.referer,
+                        Origin: source.origin,
+                    },
+                ],
+            })
+        } catch (error) {
+            await traceRuntime('getPlayinfoError', String(error).slice(0, 300))
+            throw error
         }
-        const source = await resolvePlayKrx18(embedUrl, ext.detailUrl)
-        return jsonify({
-            urls: [source.url],
-            headers: [
-                {
-                    'User-Agent': UA,
-                    Referer: source.referer,
-                    Origin: source.origin,
-                },
-            ],
-        })
     }
 
     return jsonify({
