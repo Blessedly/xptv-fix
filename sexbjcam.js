@@ -4,7 +4,7 @@ const UA =
     'Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1'
 
 const appConfig = {
-    ver: 2026090914,
+    ver: 2026090916,
     title: 'SexBJCam-修改',
     site: 'https://sexbjcam.com',
     tabs: [
@@ -239,73 +239,30 @@ function unpackPacker(source) {
 }
 
 /**
- * 从播放器代码提取 HLS 地址，并优先选择可直接读取标准 TS 分片的线路。
+ * 从播放器代码提取各条 HLS 线路，供播放页按名称选择。
  *
  * @param {string} html 播放器 HTML
  * @param {string} playerUrl 播放器页面地址
- * @return {Array<string>} 可用的 M3U8 地址
+ * @return {object} 以 hls2、hls3、hls4 命名的 M3U8 地址
  */
 function extractMediaUrls(html, playerUrl) {
     const unpacked = unpackPacker(html)
     const source = `${unpacked}\n${html}`
-    const urls = []
+    const urls = {}
 
-    // hls4 的清单会把分片转到部分网络无法连接的 TikTok CDN；
-    // hls2 使用标准 m3u8 + TS，最适合 XPTV，hls3 作为次选，最后才保留 hls4。
+    // 保留线路名称，便于用户根据当前网络手动选择最快的 CDN。
     ;['hls2', 'hls3', 'hls4'].forEach((name) => {
         const match = source.match(new RegExp(`["']${name}["']\\s*:\\s*["']([^"']+)["']`, 'i'))
         if (!match) return
         const url = absoluteUrl(match[1].replace(/\\\//g, '/'), playerUrl)
-        if (url && !urls.includes(url)) urls.push(url)
+        if (url) urls[name] = url
     })
 
-    if (urls.length === 0) {
+    if (Object.keys(urls).length === 0) {
         const fileMatch = source.match(/(?:file|src)\s*:\s*["']([^"']+(?:\.m3u8|\/master\.txt)[^"']*)["']/i)
-        if (fileMatch) urls.push(absoluteUrl(fileMatch[1].replace(/\\\//g, '/'), playerUrl))
+        if (fileMatch) urls.default = absoluteUrl(fileMatch[1].replace(/\\\//g, '/'), playerUrl)
     }
     return urls
-}
-
-/**
- * 读取 HLS 文本中的第一个有效资源地址。
- *
- * @param {string} playlist HLS 清单文本
- * @param {string} playlistUrl 当前清单地址
- * @return {string} 子清单或分片的完整地址
- */
-function firstPlaylistResource(playlist, playlistUrl) {
-    const line = String(playlist || '')
-        .split(/\r?\n/)
-        .map((item) => item.trim())
-        .find((item) => item && !item.startsWith('#'))
-    return line ? absoluteUrl(line, playlistUrl) : ''
-}
-
-/**
- * 在 XPTV 当前网络中探测主清单和子清单结构。
- *
- * @param {string} url 主清单地址
- * @return {Promise<boolean>} 当前线路是否提供有效 HLS 清单
- */
-async function probeHls(url) {
-    try {
-        const master = await requestHtml(url, '')
-        if (!/#EXTM3U/i.test(master)) return false
-
-        const childUrl = firstPlaylistResource(master, url)
-        if (!childUrl) return false
-        const child = await requestHtml(childUrl, '')
-        if (!/#EXTM3U/i.test(child)) return false
-
-        const segmentUrl = firstPlaylistResource(child, childUrl)
-        if (!segmentUrl) return false
-
-        // XPTV 的 $fetch 对二进制 TS 可能返回空字符串，不能据此判断原生播放器不可用。
-        // 主、子清单均有效且存在分片地址时，交给原生播放器实际读取媒体数据。
-        return true
-    } catch (_) {
-        return false
-    }
 }
 
 /**
@@ -360,10 +317,16 @@ async function getTracks(ext) {
                     title: '默认分组',
                     tracks: [
                         {
-                            name: '播放',
+                            name: '高速线路',
                             pan: '',
-                            // 播放时再解析临时地址，避免用户停留详情页后签名过期。
-                            ext: { playerUrl, detailUrl },
+                            // hls4 使用网页播放器常用的媒体 CDN，优先用于速度测试。
+                            ext: { playerUrl, detailUrl, line: 'hls4' },
+                        },
+                        {
+                            name: '兼容线路',
+                            pan: '',
+                            // hls2 使用标准 M3U8 与 TS 分片，兼容性更好但部分网络较慢。
+                            ext: { playerUrl, detailUrl, line: 'hls2' },
                         },
                     ],
                 },
@@ -382,26 +345,15 @@ async function getPlayinfo(ext) {
     ext = argsify(ext)
     const playerUrl = absoluteUrl(ext.playerUrl || ext.url || '')
     const detailUrl = absoluteUrl(ext.detailUrl || `${appConfig.site}/`)
+    const preferredLine = String(ext.line || 'hls4')
 
     try {
         // 播放器必须由手机直取，使临时 HLS 签名与原生播放器使用相同的网络出口。
         const html = await requestHtml(playerUrl, detailUrl)
         const mediaUrls = extractMediaUrls(html, playerUrl)
-        if (mediaUrls.length === 0) throw new Error('播放器未解析到 M3U8 地址')
-
-        let playUrl = ''
-        const probeResults = []
-        // 必须在 XPTV 所在手机上探测，桌面端和手机代理规则可能选择不同的可用 CDN。
-        for (let index = 0; index < mediaUrls.length; index += 1) {
-            const candidate = mediaUrls[index]
-            const available = await probeHls(candidate)
-            probeResults.push(`${index + 1}:${available ? 'ok' : 'fail'}`)
-            if (available) {
-                playUrl = candidate
-                break
-            }
-        }
-        if (!playUrl) throw new Error(`三条 HLS 线路都不可用（${probeResults.join(',')}）`)
+        const playUrl =
+            mediaUrls[preferredLine] || mediaUrls.hls4 || mediaUrls.hls2 || mediaUrls.default || ''
+        if (!playUrl) throw new Error('播放器未解析到 M3U8 地址')
 
         return jsonify({
             urls: [playUrl],
