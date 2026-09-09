@@ -3,8 +3,11 @@ const cheerio = createCheerio()
 const UA =
     'Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1'
 
+// Worker 只代取 recordplay 播放器 HTML，视频清单和分片仍由手机直接读取。
+const PLAY_PROXY = 'https://sexbjcam-control.blessedlymm.workers.dev'
+
 const appConfig = {
-    ver: 2026090905,
+    ver: 2026090907,
     title: 'SexBJCam-修改',
     site: 'https://sexbjcam.com',
     tabs: [
@@ -66,6 +69,7 @@ async function requestHtml(url, referer = `${appConfig.site}/`) {
 
     const { data } = await $fetch.get(url, {
         headers: requestHeaders,
+        timeout: 15000,
     })
     return typeof data === 'string' ? data : String(data || '')
 }
@@ -94,6 +98,23 @@ function isChallengePage(html) {
 function showError(message) {
     // XPTV 对直接调用支持最稳定，不再用兼容判断吞掉提示异常。
     $utils.toastError(String(message || '未知错误'))
+}
+
+/**
+ * 通过 Worker 获取 XPTV 无法直接读取的 recordplay 播放器页面。
+ *
+ * @param {string} playerUrl 播放器地址
+ * @param {string} detailUrl SexBJCam 详情页地址
+ * @return {Promise<string>} 播放器 HTML
+ */
+async function requestPlayerHtml(playerUrl, detailUrl) {
+    const proxy = String(PLAY_PROXY || '').replace(/\/+$/, '')
+    if (!proxy) return requestHtml(playerUrl, detailUrl)
+
+    const url = `${proxy}/player-page?url=${encodeURIComponent(
+        playerUrl
+    )}&referer=${encodeURIComponent(detailUrl)}`
+    return requestHtml(url, '')
 }
 
 /**
@@ -355,7 +376,7 @@ async function getPlayinfo(ext) {
     $utils.toastError('运行轨迹 stage=getPlayinfo detail=start')
 
     try {
-        const html = await requestHtml(playerUrl, detailUrl)
+        const html = await requestPlayerHtml(playerUrl, detailUrl)
         $utils.toastError(`运行轨迹 stage=playerHtml detail=${html.length}`)
         const mediaUrls = extractMediaUrls(html, playerUrl)
         if (mediaUrls.length === 0) throw new Error('播放器未解析到 M3U8 地址')
