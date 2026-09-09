@@ -4,7 +4,7 @@ const UA =
     'Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1'
 
 const appConfig = {
-    ver: 2026090903,
+    ver: 2026090904,
     title: 'SexBJCam-修改',
     site: 'https://sexbjcam.com',
     tabs: [
@@ -61,11 +61,11 @@ function absoluteUrl(url, baseUrl = `${appConfig.site}/`) {
  * @return {Promise<string>} HTML 文本
  */
 async function requestHtml(url, referer = `${appConfig.site}/`) {
+    const requestHeaders = { ...htmlHeaders }
+    if (referer) requestHeaders.Referer = referer
+
     const { data } = await $fetch.get(url, {
-        headers: {
-            ...htmlHeaders,
-            Referer: referer,
-        },
+        headers: requestHeaders,
     })
     return typeof data === 'string' ? data : String(data || '')
 }
@@ -216,6 +216,61 @@ function extractMediaUrls(html, playerUrl) {
 }
 
 /**
+ * 读取 HLS 文本中的第一个有效资源地址。
+ *
+ * @param {string} playlist HLS 清单文本
+ * @param {string} playlistUrl 当前清单地址
+ * @return {string} 子清单或分片的完整地址
+ */
+function firstPlaylistResource(playlist, playlistUrl) {
+    const line = String(playlist || '')
+        .split(/\r?\n/)
+        .map((item) => item.trim())
+        .find((item) => item && !item.startsWith('#'))
+    return line ? absoluteUrl(line, playlistUrl) : ''
+}
+
+/**
+ * 在 XPTV 当前网络中逐级探测主清单、子清单和首个视频分片。
+ *
+ * @param {string} url 主清单地址
+ * @return {Promise<boolean>} 当前线路是否能读取视频数据
+ */
+async function probeHls(url) {
+    try {
+        const requestHeaders = { 'User-Agent': UA }
+        const master = await requestHtml(url, '')
+        if (!/#EXTM3U/i.test(master)) return false
+
+        const childUrl = firstPlaylistResource(master, url)
+        if (!childUrl) return false
+        const child = await requestHtml(childUrl, '')
+        if (!/#EXTM3U/i.test(child)) return false
+
+        const segmentUrl = firstPlaylistResource(child, childUrl)
+        if (!segmentUrl) return false
+
+        // 只读取首个分片的前 1KB，验证手机网络可用性，避免预检下载整个视频分片。
+        const response = await $fetch.get(segmentUrl, {
+            headers: {
+                ...requestHeaders,
+                Range: 'bytes=0-1023',
+            },
+            responseType: 'arraybuffer',
+            timeout: 10000,
+        })
+        const data = response && response.data
+        if (data == null) return false
+        if (typeof data === 'string') return data.length > 0
+        if (typeof data.byteLength === 'number') return data.byteLength > 0
+        if (typeof data.length === 'number') return data.length > 0
+        return true
+    } catch (_) {
+        return false
+    }
+}
+
+/**
  * 返回扩展配置。
  */
 async function getConfig() {
@@ -304,19 +359,28 @@ async function getPlayinfo(ext) {
         const mediaUrls = extractMediaUrls(html, playerUrl)
         if (mediaUrls.length === 0) throw new Error('播放器未解析到 M3U8 地址')
 
-        // XPTV 不会执行网页播放器的 hls4 失败回退逻辑，只返回已验证可读取分片的首选线路。
-        const playUrl = mediaUrls[0]
-
-        const playerOrigin = (playerUrl.match(/^(https?:\/\/[^/]+)/i) || [])[1] || 'https://recordplay.biz'
-        const playHeaders = {
-            'User-Agent': UA,
-            Referer: playerUrl,
-            Origin: playerOrigin,
+        let playUrl = ''
+        const probeResults = []
+        // 必须在 XPTV 所在手机上探测，桌面端和手机代理规则可能选择不同的可用 CDN。
+        for (let index = 0; index < mediaUrls.length; index += 1) {
+            const candidate = mediaUrls[index]
+            const available = await probeHls(candidate)
+            probeResults.push(`${index + 1}:${available ? 'ok' : 'fail'}`)
+            if (available) {
+                playUrl = candidate
+                break
+            }
         }
+        if (!playUrl) throw new Error(`三条 HLS 线路的分片都不可用（${probeResults.join(',')}）`)
+
+        // 调试版本临时显示手机端检测结果，用于区分脚本请求与原生播放器的网络差异。
+        showError(`播放线路检测 ${probeResults.join(',')}（1=hls2 2=hls3 3=hls4）`)
+
         return jsonify({
             urls: [playUrl],
             type: 'm3u8',
-            headers: [playHeaders],
+            // CDN 地址已经包含签名，不需要 Referer/Origin，避免原生播放器对子请求头处理不一致。
+            headers: [{ 'User-Agent': UA }],
         })
     } catch (error) {
         showError(String(error))
