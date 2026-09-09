@@ -1,0 +1,8 @@
+#!name=AVToday UA 修复
+#!desc=为 AVToday 签名 MP4 补写固定 User-Agent，视频仍由手机直连，不经过中转。
+
+[Script]
+http-request ^https:\/\/video\.xdmm\.workers\.dev\/.*\.mp4(?:\?.*)?$ script-path=https://raw.githubusercontent.com/Blessedly/xptv-fix/main/shadowrocket/avtoday-ua.js, requires-body=false, timeout=10, tag=AVToday-UA, enable=true
+
+[MITM]
+hostname = %APPEND% video.xdmm.workers.dev

@@ -9,12 +9,9 @@ const headers = {
     'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
 }
 
-// 使用 Shadowrocket 修复模块时保持为空；未使用模块时可填入已部署的 Worker 地址。
-const PLAY_PROXY = ''
-
 const appConfig = {
-    ver: 2026090402,
-    title: 'avtoday',
+    ver: 2026090905,
+    title: 'AVToday-修改',
     site: 'https://avtoday.io',
 }
 
@@ -46,16 +43,6 @@ function cleanText(text) {
         .replace(/\u00a0/g, ' ')
         .replace(/\s+/g, ' ')
         .trim()
-}
-
-/**
- * 根据代理配置生成客户端可以直接播放的媒体地址。
- */
-function getPlayableUrl(url) {
-    const mediaUrl = absoluteUrl(url)
-    const proxy = String(PLAY_PROXY || '').replace(/\/+$/, '')
-    if (!mediaUrl || !proxy) return mediaUrl
-    return `${proxy}/proxy?url=${encodeURIComponent(mediaUrl)}`
 }
 
 /**
@@ -173,7 +160,7 @@ async function getCards(ext) {
 }
 
 /**
- * 从详情页 iframe 获取播放器页，再提取真实 m3u8 地址。
+ * 从详情页提取播放器地址，媒体临时签名在点击播放时再获取。
  */
 async function getTracks(ext) {
     ext = argsify(ext)
@@ -195,13 +182,6 @@ async function getTracks(ext) {
         }
         if (!playerUrl) throw new Error('详情页没有找到播放器 iframe')
 
-        const playerResponse = await $fetch.get(playerUrl, {
-            headers: { ...headers, Referer: pageUrl },
-        })
-        const playMatch = String(playerResponse.data).match(/m3u8_url\s*=\s*['"]([^'"]+)['"]/i)
-        if (!playMatch || !playMatch[1]) throw new Error('播放器页没有找到 m3u8_url')
-        const useProxy = Boolean(String(PLAY_PROXY || '').trim())
-
         return jsonify({
             list: [
                 {
@@ -211,8 +191,8 @@ async function getTracks(ext) {
                             name: '播放',
                             pan: '',
                             ext: {
-                                url: getPlayableUrl(playMatch[1]),
-                                useProxy,
+                                playerUrl,
+                                pageUrl,
                             },
                         },
                     ],
@@ -221,27 +201,55 @@ async function getTracks(ext) {
         })
     } catch (error) {
         $print(`avtoday 播放解析失败：${error}`)
+        $utils.toastError(String(error))
         return jsonify({ list: [] })
     }
 }
 
 /**
- * 返回媒体清单与分片服务器要求的请求头。
+ * 点击播放时读取最新 MP4 或 M3U8 临时地址。
  */
 async function getPlayinfo(ext) {
     ext = argsify(ext)
-    const url = absoluteUrl(ext.url)
-    const playHeaders = { 'User-Agent': UA }
+    const playerUrl = absoluteUrl(ext.playerUrl || '')
+    const pageUrl = absoluteUrl(ext.pageUrl || '')
+    if (!playerUrl) throw new Error('缺少播放器地址')
 
-    if (!ext.useProxy) {
-        // 直连模式仍保留来源页；代理模式已由 Worker 在服务端补齐该请求头。
-        playHeaders.Referer = `${appConfig.site}/`
+    try {
+        const playerResponse = await $fetch.get(playerUrl, {
+            headers: { ...headers, Referer: pageUrl || `${appConfig.site}/` },
+            timeout: 15000,
+        })
+        const playerHtml = String(playerResponse.data || '')
+        const videoMatch = playerHtml.match(/video_link\s*=\s*['"]([^'"]+)['"]/i)
+        const m3u8Match = playerHtml.match(/m3u8_url\s*=\s*['"]([^'"]+)['"]/i)
+        const rawUrl = (videoMatch && videoMatch[1]) || (m3u8Match && m3u8Match[1]) || ''
+        const mediaUrl = absoluteUrl(
+            rawUrl
+                .replace(/\\\//g, '/')
+                .replace(/\\u0026/gi, '&')
+                .replace(/&amp;/g, '&')
+        )
+        if (!mediaUrl) throw new Error('播放器页没有找到 video_link 或 m3u8_url')
+
+        const type = /\.m3u8(?:[?#]|$)/i.test(mediaUrl) ? 'm3u8' : 'mp4'
+        const mediaHeaders = {
+            'User-Agent': UA,
+            Referer: playerUrl,
+            Origin: appConfig.site,
+        }
+
+        return jsonify({
+            urls: [mediaUrl],
+            type,
+            // 签名包含 User-Agent 校验，原生播放器必须与解析播放器页时保持一致。
+            headers: [mediaHeaders],
+        })
+    } catch (error) {
+        $print(`avtoday 播放地址解析失败：${error}`)
+        $utils.toastError(String(error))
+        throw error
     }
-
-    return jsonify({
-        urls: [url],
-        headers: [playHeaders],
-    })
 }
 
 /**
