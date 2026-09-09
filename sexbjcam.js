@@ -4,7 +4,7 @@ const UA =
     'Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1'
 
 const appConfig = {
-    ver: 2026090901,
+    ver: 2026090902,
     title: 'SexBJCam-修改',
     site: 'https://sexbjcam.com',
     tabs: [
@@ -78,7 +78,12 @@ async function requestHtml(url, referer = `${appConfig.site}/`) {
  */
 function isChallengePage(html) {
     const value = String(html || '')
-    return /Just a moment|cf-chl-|challenge-platform|Enable JavaScript and cookies/i.test(value)
+    const challengeTitle = /<title[^>]*>\s*Just a moment(?:\.\.\.)?\s*<\/title>/i.test(value)
+    const challengeMessage = /Enable JavaScript and cookies to continue/i.test(value)
+    const managedChallenge = /id=["']challenge-form["']/i.test(value) && /window\._cf_chl_opt/i.test(value)
+
+    // 正常页面也可能引用 challenge-platform 或 Turnstile，不能仅凭脚本地址判断为拦截页。
+    return challengeTitle || challengeMessage || managedChallenge
 }
 
 /**
@@ -227,11 +232,13 @@ async function getCards(ext) {
 
     try {
         const html = await requestHtml(url)
-        if (isChallengePage(html)) throw new Error('SexBJCam 被 Cloudflare 拦截，请检查代理后重试')
-
         const cards = parseCards(html)
+        // 页面能解析出卡片时直接成功，避免正常页面中的 Cloudflare 组件造成误判。
+        if (cards.length > 0) return jsonify({ list: cards })
+
+        if (isChallengePage(html)) throw new Error('SexBJCam 返回了 Cloudflare 验证页，请检查代理后重试')
         if (cards.length === 0) throw new Error('SexBJCam 列表为空，页面结构可能已变化')
-        return jsonify({ list: cards })
+        return jsonify({ list: [] })
     } catch (error) {
         showError(String(error))
         throw error
@@ -247,8 +254,6 @@ async function getTracks(ext) {
 
     try {
         const html = await requestHtml(detailUrl)
-        if (isChallengePage(html)) throw new Error('SexBJCam 详情页被 Cloudflare 拦截')
-
         const $ = cheerio.load(html)
         let playerUrl =
             $('iframe[src*="recordplay"], iframe[data-src*="recordplay"], iframe[src], iframe[data-src]')
@@ -259,6 +264,9 @@ async function getTracks(ext) {
                 .attr('data-src') ||
             ''
         playerUrl = absoluteUrl(playerUrl, detailUrl)
+
+        // 优先信任已经解析出的播放器，正常详情页可能包含 Cloudflare 的通用组件代码。
+        if (!playerUrl && isChallengePage(html)) throw new Error('SexBJCam 返回了 Cloudflare 详情验证页')
         if (!playerUrl) throw new Error('详情页没有找到播放器 iframe')
 
         return jsonify({
@@ -323,8 +331,10 @@ async function search(ext) {
 
     try {
         const html = await requestHtml(url)
-        if (isChallengePage(html)) throw new Error('SexBJCam 搜索页被 Cloudflare 拦截')
-        return jsonify({ list: parseCards(html) })
+        const cards = parseCards(html)
+        if (cards.length > 0) return jsonify({ list: cards })
+        if (isChallengePage(html)) throw new Error('SexBJCam 返回了 Cloudflare 搜索验证页')
+        return jsonify({ list: [] })
     } catch (error) {
         showError(String(error))
         throw error
