@@ -2,7 +2,7 @@
 #!desc=为 AVToday 签名 MP4 补写固定 User-Agent，视频仍由手机直连，不经过中转。
 
 [Script]
-http-request ^https:\/\/video\.xdmm\.workers\.dev\/.*\.mp4(?:\?.*)?$ script-path=https://raw.githubusercontent.com/Blessedly/xptv-fix/main/shadowrocket/avtoday-ua.js, requires-body=false, timeout=10, tag=AVToday-UA, enable=true
+AVToday-UA = type=http-request, pattern=^https:\/\/video\.xdmm\.workers\.dev\/.*\.mp4(?:\?.*)?$, requires-body=0, timeout=10, engine=jsc, script-path=https://raw.githubusercontent.com/Blessedly/xptv-fix/main/shadowrocket/avtoday-ua.js?v=2026090902
 
 [MITM]
 hostname = %APPEND% video.xdmm.workers.dev

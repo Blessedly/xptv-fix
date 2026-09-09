@@ -8,4 +8,8 @@ Object.keys(headers).forEach((name) => {
 })
 headers['User-Agent'] = UA
 
+// 在 Shadowrocket 脚本日志中记录命中情况及分段请求，便于确认原生播放器是否经过模块。
+const range = headers.Range || headers.range || 'none'
+console.log(`[AVToday-UA] hit range=${range} url=${$request.url}`)
+
 $done({ headers })
