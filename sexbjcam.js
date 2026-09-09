@@ -4,7 +4,7 @@ const UA =
     'Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1'
 
 const appConfig = {
-    ver: 2026090904,
+    ver: 2026090905,
     title: 'SexBJCam-修改',
     site: 'https://sexbjcam.com',
     tabs: [
@@ -92,10 +92,8 @@ function isChallengePage(html) {
  * @param {string} message 错误信息
  */
 function showError(message) {
-    const text = String(message || '未知错误')
-    try {
-        if (typeof $utils !== 'undefined' && $utils.toastError) $utils.toastError(text)
-    } catch (_) {}
+    // XPTV 对直接调用支持最稳定，不再用兼容判断吞掉提示异常。
+    $utils.toastError(String(message || '未知错误'))
 }
 
 /**
@@ -324,6 +322,7 @@ async function getTracks(ext) {
         // 优先信任已经解析出的播放器，正常详情页可能包含 Cloudflare 的通用组件代码。
         if (!playerUrl && isChallengePage(html)) throw new Error('SexBJCam 返回了 Cloudflare 详情验证页')
         if (!playerUrl) throw new Error('详情页没有找到播放器 iframe')
+        $utils.toastError('运行轨迹 stage=getTracks detail=playerReady')
 
         return jsonify({
             list: [
@@ -353,11 +352,14 @@ async function getPlayinfo(ext) {
     ext = argsify(ext)
     const playerUrl = absoluteUrl(ext.playerUrl || ext.url || '')
     const detailUrl = absoluteUrl(ext.detailUrl || `${appConfig.site}/`)
+    $utils.toastError('运行轨迹 stage=getPlayinfo detail=start')
 
     try {
         const html = await requestHtml(playerUrl, detailUrl)
+        $utils.toastError(`运行轨迹 stage=playerHtml detail=${html.length}`)
         const mediaUrls = extractMediaUrls(html, playerUrl)
         if (mediaUrls.length === 0) throw new Error('播放器未解析到 M3U8 地址')
+        $utils.toastError(`运行轨迹 stage=mediaUrls detail=${mediaUrls.length}`)
 
         let playUrl = ''
         const probeResults = []
@@ -366,6 +368,7 @@ async function getPlayinfo(ext) {
             const candidate = mediaUrls[index]
             const available = await probeHls(candidate)
             probeResults.push(`${index + 1}:${available ? 'ok' : 'fail'}`)
+            $utils.toastError(`运行轨迹 stage=probe detail=${probeResults.join(',')}`)
             if (available) {
                 playUrl = candidate
                 break
@@ -374,7 +377,7 @@ async function getPlayinfo(ext) {
         if (!playUrl) throw new Error(`三条 HLS 线路的分片都不可用（${probeResults.join(',')}）`)
 
         // 调试版本临时显示手机端检测结果，用于区分脚本请求与原生播放器的网络差异。
-        showError(`播放线路检测 ${probeResults.join(',')}（1=hls2 2=hls3 3=hls4）`)
+        $utils.toastError(`播放线路检测 ${probeResults.join(',')}（1=hls2 2=hls3 3=hls4）`)
 
         return jsonify({
             urls: [playUrl],
