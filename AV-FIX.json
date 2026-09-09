@@ -65,6 +65,11 @@
             "type": 3,
             "api": "csp_blessedly_sexbjcam",
             "ext": "https://raw.githubusercontent.com/Blessedly/xptv-fix/refs/heads/main/sexbjcam.js"
+        },{
+            "name": "AVToday（修）",
+            "type": 3,
+            "api": "csp_blessedly_sexbjcam",
+            "ext": "https://raw.githubusercontent.com/Blessedly/xptv-fix/refs/heads/main/avtoday.js"
         }
     ]
 }
