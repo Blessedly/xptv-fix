@@ -4,7 +4,7 @@ const UA =
     'Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1'
 
 const appConfig = {
-    ver: 2026090902,
+    ver: 2026090903,
     title: 'SexBJCam-修改',
     site: 'https://sexbjcam.com',
     tabs: [
@@ -188,7 +188,7 @@ function unpackPacker(source) {
 }
 
 /**
- * 从播放器代码提取 HLS 地址，并按播放器默认优先级排序。
+ * 从播放器代码提取 HLS 地址，并优先选择可直接读取标准 TS 分片的线路。
  *
  * @param {string} html 播放器 HTML
  * @param {string} playerUrl 播放器页面地址
@@ -199,8 +199,9 @@ function extractMediaUrls(html, playerUrl) {
     const source = `${unpacked}\n${html}`
     const urls = []
 
-    // recordplay 默认依次使用 hls4、hls3、hls2，保留后两条作为备用线路。
-    ;['hls4', 'hls3', 'hls2'].forEach((name) => {
+    // hls4 的清单会把分片转到部分网络无法连接的 TikTok CDN；
+    // hls2 使用标准 m3u8 + TS，最适合 XPTV，hls3 作为次选，最后才保留 hls4。
+    ;['hls2', 'hls3', 'hls4'].forEach((name) => {
         const match = source.match(new RegExp(`["']${name}["']\\s*:\\s*["']([^"']+)["']`, 'i'))
         if (!match) return
         const url = absoluteUrl(match[1].replace(/\\\//g, '/'), playerUrl)
@@ -291,7 +292,7 @@ async function getTracks(ext) {
 }
 
 /**
- * 播放时即时解包播放器，返回主线路及备用 HLS 地址。
+ * 播放时即时解包播放器，只返回最适合 XPTV 的 HLS 线路。
  */
 async function getPlayinfo(ext) {
     ext = argsify(ext)
@@ -300,8 +301,11 @@ async function getPlayinfo(ext) {
 
     try {
         const html = await requestHtml(playerUrl, detailUrl)
-        const urls = extractMediaUrls(html, playerUrl)
-        if (urls.length === 0) throw new Error('播放器未解析到 M3U8 地址')
+        const mediaUrls = extractMediaUrls(html, playerUrl)
+        if (mediaUrls.length === 0) throw new Error('播放器未解析到 M3U8 地址')
+
+        // XPTV 不会执行网页播放器的 hls4 失败回退逻辑，只返回已验证可读取分片的首选线路。
+        const playUrl = mediaUrls[0]
 
         const playerOrigin = (playerUrl.match(/^(https?:\/\/[^/]+)/i) || [])[1] || 'https://recordplay.biz'
         const playHeaders = {
@@ -310,9 +314,9 @@ async function getPlayinfo(ext) {
             Origin: playerOrigin,
         }
         return jsonify({
-            urls,
+            urls: [playUrl],
             type: 'm3u8',
-            headers: urls.map(() => playHeaders),
+            headers: [playHeaders],
         })
     } catch (error) {
         showError(String(error))
