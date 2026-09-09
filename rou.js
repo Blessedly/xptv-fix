@@ -2,9 +2,10 @@ const cheerio = createCheerio()
 
 const UA =
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0'
+const PLAY_PROXY = 'https://rou-control.blessedlymm.workers.dev'
 
 const appConfig = {
-    ver: 2026090801,
+    ver: 2026090901,
     title: '肉视频-Fix',
     site: 'https://rou.video',
     tabs: [
@@ -105,50 +106,6 @@ function parseCards(html) {
 }
 
 /**
- * 解码站点自定义的 Base64 数据。
- *
- * @param {string} value Base64 文本
- * @return {string} 解码后的文本
- */
-function decodeBase64(value) {
-    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/='
-    const indices = {}
-    for (let index = 0; index < alphabet.length; index++) indices[alphabet[index]] = index
-
-    const paddingIndex = value.indexOf('=')
-    const padded = paddingIndex > -1
-    const length = padded ? paddingIndex : value.length
-    let position = -1
-    let result = ''
-
-    while (position < length) {
-        const code =
-            (indices[value[++position]] << 18) |
-            (indices[value[++position]] << 12) |
-            (indices[value[++position]] << 6) |
-            indices[value[++position]]
-        if (code !== 0) {
-            result += String.fromCharCode((code >>> 16) & 255, (code >>> 8) & 255, code & 255)
-        }
-    }
-    return padded ? result.slice(0, paddingIndex - value.length) : result
-}
-
-/**
- * 解码详情页 __NEXT_DATA__ 中的播放参数。
- *
- * @param {{d:string,k:number}} ev 加密播放参数
- * @return {object} 解码后的播放信息
- */
-function decodeEv(ev) {
-    const decoded = decodeBase64(ev.d)
-        .split('')
-        .map((character) => String.fromCharCode(character.charCodeAt(0) - ev.k))
-        .join('')
-    return JSON.parse(decoded)
-}
-
-/**
  * 返回扩展配置。
  */
 async function getConfig() {
@@ -174,17 +131,11 @@ async function getCards(ext) {
 async function getTracks(ext) {
     ext = argsify(ext)
     const detailUrl = absoluteUrl(ext.url)
-    const html = await requestHtml(detailUrl)
-    const $ = cheerio.load(html)
-    const scriptContent = $('#__NEXT_DATA__').html()
-    if (!scriptContent) throw new Error('详情页缺少 __NEXT_DATA__ 播放数据')
+    const idMatch = detailUrl.match(/\/v\/([a-z0-9]+)/i)
+    if (!idMatch) throw new Error('详情地址中缺少视频 ID')
 
-    const jsonData = JSON.parse(scriptContent)
-    const ev = jsonData.props && jsonData.props.pageProps && jsonData.props.pageProps.ev
-    if (!ev || !ev.d) throw new Error('详情页缺少 ev 加密播放参数')
-
-    const decodedEv = decodeEv(ev)
-    const playUrl = absoluteUrl(decodedEv.videoUrl)
+    // Worker 会解包伪装成 PNG 的 M3U8，并继续代理清单内的所有媒体分片。
+    const playUrl = `${PLAY_PROXY}/hls?id=${encodeURIComponent(idMatch[1])}`
     return jsonify({
         list: [
             {
@@ -193,7 +144,7 @@ async function getTracks(ext) {
                     {
                         name: '播放',
                         pan: '',
-                        ext: { url: playUrl, referer: detailUrl },
+                        ext: { url: playUrl, type: 'm3u8' },
                     },
                 ],
             },
@@ -206,13 +157,12 @@ async function getTracks(ext) {
  */
 async function getPlayinfo(ext) {
     ext = argsify(ext)
-    const playUrl = absoluteUrl(ext.url).replace('.jpg', '.m3u8')
     return jsonify({
-        urls: [playUrl],
+        urls: [ext.url],
+        type: ext.type || 'm3u8',
         headers: [
             {
                 'User-Agent': UA,
-                Referer: ext.referer || `${appConfig.site}/`,
             },
         ],
     })
