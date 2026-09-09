@@ -5,7 +5,7 @@ const UA =
 const PLAY_PROXY = 'https://rou-control.blessedlymm.workers.dev'
 
 const appConfig = {
-    ver: 2026090902,
+    ver: 2026090903,
     title: '肉视频-Fix',
     site: 'https://rou.video',
     tabs: [
@@ -233,7 +233,7 @@ async function getTracks(ext) {
 
     // 先由手机取得 CDN 地址，再让 Worker 解包，避免 Rou 对 Worker 出口返回 403。
     const cdnManifest = await resolveCdnManifest(idMatch[1], detailUrl)
-    const playUrl = `${PLAY_PROXY}/media?url=${encodeURIComponent(cdnManifest)}`
+    const playUrl = `${PLAY_PROXY}/manifest.m3u8?url=${encodeURIComponent(cdnManifest)}`
     return jsonify({
         list: [
             {
