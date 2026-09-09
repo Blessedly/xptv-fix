@@ -4,7 +4,7 @@ const UA =
     'Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1'
 
 const appConfig = {
-    ver: 2026090901,
+    ver: 2026090902,
     title: '123AV-修改',
     site: 'https://123av.com',
     tabs: [
@@ -169,9 +169,11 @@ function parseCards(html, pageUrl) {
                 image.attr('src'),
             pageUrl,
         )
-        const duration = cleanText(
-            item.find('.card__duration, .duration, .video-duration, [class*="duration"]').first().text(),
+        let duration = cleanText(
+            item.find('.card__dur, .card__duration, .duration, .video-duration, [class*="duration"]').first().text(),
         )
+        // 新站列表暂时统一输出 0:00，这是未计算时长的占位值，不能作为卡片标题或备注展示。
+        if (/^0:00$/.test(duration)) duration = ''
         if (!title || !cover) return
 
         seen[href] = true
@@ -339,6 +341,89 @@ function extractDirectMedia(html, baseUrl) {
 }
 
 /**
+ * 解码详情页 player(JSON.parse('...')) 中嵌套的 JavaScript 字符串。
+ *
+ * @param {string} value JavaScript 字符串内容
+ * @return {string} 可交给 JSON.parse 的 JSON 文本
+ */
+function decodePlayerJson(value) {
+    const source = String(value || '')
+
+    try {
+        // 外层 JSON.parse 负责还原 \u0022 与双重斜杠，结果才是实际的线路 JSON。
+        return JSON.parse(`"${source.replace(/"/g, '\\"')}"`)
+    } catch (_) {
+        // 保留手工解码回退，兼容站点偶尔输出未双重转义的内容。
+        return source
+            .replace(/\\u([0-9a-f]{4})/gi, (_, code) => String.fromCharCode(parseInt(code, 16)))
+            .replace(/\\\//g, '/')
+    }
+}
+
+/**
+ * 从新版详情页提取全部 javplayer.cc 播放线路。
+ *
+ * @param {string} html 详情页 HTML
+ * @return {Array<object>} 播放线路
+ */
+function extractPlayerEpisodes(html) {
+    const source = String(html || '')
+    const match = source.match(/player\s*\(\s*JSON\.parse\(\s*'((?:\\.|[^'])*)'\s*\)/i)
+    if (!match) return []
+
+    try {
+        const episodes = JSON.parse(decodePlayerJson(match[1]))
+        if (!Array.isArray(episodes)) return []
+
+        return episodes
+            .map((episode, index) => ({
+                name: cleanText(episode.name) || `线路${index + 1}`,
+                url: normalizeMediaUrl(episode.url, appConfig.site),
+            }))
+            .filter((episode) => /^https?:\/\/(?:www\.)?javplayer\.cc\//i.test(episode.url))
+    } catch (error) {
+        $print(`123AV 播放线路 JSON 解析失败：${error}`)
+        return []
+    }
+}
+
+/**
+ * 调用新版 javplayer.cc stream 接口取得真实媒体地址。
+ *
+ * @param {string} playerUrl javplayer.cc 嵌入页地址
+ * @return {Promise<object>} 播放地址、字幕和防盗链来源
+ */
+async function resolveJavPlayer(playerUrl) {
+    const idMatch = String(playerUrl).match(/\/e\/([a-z0-9_]+)/i)
+    const originMatch = String(playerUrl).match(/^(https?:\/\/[^/]+)/i)
+    if (!idMatch || !originMatch) throw new Error('javplayer.cc 播放地址格式无效')
+
+    const origin = originMatch[1]
+    const queryIndex = playerUrl.indexOf('?')
+    const oldQuery = queryIndex >= 0 ? playerUrl.slice(queryIndex + 1) : ''
+    const streamUrl = `${origin}/stream?${oldQuery ? `${oldQuery}&` : ''}id=${encodeURIComponent(idMatch[1])}`
+    const response = await $fetch.get(streamUrl, {
+        headers: {
+            'User-Agent': UA,
+            Accept: 'application/json',
+            Referer: playerUrl,
+            Origin: origin,
+        },
+        timeout: 15000,
+    })
+    const payload = typeof response.data === 'string' ? JSON.parse(response.data) : response.data
+    const media = payload && payload.media ? payload.media : null
+    const playUrl = media ? normalizeMediaUrl(media.stream, origin) : ''
+    if (!playUrl) throw new Error('javplayer.cc stream 接口未返回媒体地址')
+
+    return {
+        playUrl,
+        subtitle: normalizeMediaUrl(media.vtt, origin),
+        referer: playerUrl,
+    }
+}
+
+/**
  * 通过原站保留的 surrit.store 加密接口解析一个播放源。
  *
  * @param {string} encryptedUrl data-url 密文
@@ -386,6 +471,25 @@ async function getTracks(ext) {
         }
 
         const $ = cheerio.load(html)
+        const episodes = extractPlayerEpisodes(html)
+        for (let index = 0; index < episodes.length; index++) {
+            try {
+                const result = await resolveJavPlayer(episodes[index].url)
+                tracks.push({
+                    name: episodes[index].name,
+                    pan: '',
+                    ext: {
+                        playUrl: result.playUrl,
+                        subtitle: result.subtitle,
+                        referer: result.referer,
+                    },
+                })
+            } catch (error) {
+                $print(`123AV 第 ${index + 1} 条 javplayer 线路解析失败：${error}`)
+            }
+        }
+
+        // 保留旧 surrit.store 解密线路作为过渡兼容，只有旧详情页仍存在 data-url 时才会执行。
         const encryptedSources = []
         $('#video-files [data-url], #video-files div[data-url], [data-url]').each((_, element) => {
             const value = String($(element).attr('data-url') || '').trim()
