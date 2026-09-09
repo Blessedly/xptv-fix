@@ -3,11 +3,8 @@ const cheerio = createCheerio()
 const UA =
     'Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1'
 
-// Worker 只代取 recordplay 播放器 HTML，视频清单和分片仍由手机直接读取。
-const PLAY_PROXY = 'https://sexbjcam-control.blessedlymm.workers.dev'
-
 const appConfig = {
-    ver: 2026090907,
+    ver: 2026090914,
     title: 'SexBJCam-修改',
     site: 'https://sexbjcam.com',
     tabs: [
@@ -101,23 +98,6 @@ function showError(message) {
 }
 
 /**
- * 通过 Worker 获取 XPTV 无法直接读取的 recordplay 播放器页面。
- *
- * @param {string} playerUrl 播放器地址
- * @param {string} detailUrl SexBJCam 详情页地址
- * @return {Promise<string>} 播放器 HTML
- */
-async function requestPlayerHtml(playerUrl, detailUrl) {
-    const proxy = String(PLAY_PROXY || '').replace(/\/+$/, '')
-    if (!proxy) return requestHtml(playerUrl, detailUrl)
-
-    const url = `${proxy}/player-page?url=${encodeURIComponent(
-        playerUrl
-    )}&referer=${encodeURIComponent(detailUrl)}`
-    return requestHtml(url, '')
-}
-
-/**
  * 从列表页解析视频卡片，兼容源站常见的 WordPress 视频主题结构。
  *
  * @param {string} html 列表页 HTML
@@ -167,6 +147,58 @@ function parseCards(html) {
     })
 
     return cards
+}
+
+/**
+ * 从详情页 iframe 中提取真正的 recordplay 地址。
+ *
+ * @param {string} html 详情页 HTML
+ * @param {string} detailUrl 详情页地址
+ * @return {string} 播放器完整地址
+ */
+function extractPlayerUrl(html, detailUrl) {
+    const $ = cheerio.load(html)
+    const attributes = ['data-link', 'data-src', 'src']
+    let playerUrl = ''
+
+    $('iframe').each((_, element) => {
+        if (playerUrl) return
+        const iframe = $(element)
+        for (const attribute of attributes) {
+            const value = String(iframe.attr(attribute) || '').trim()
+            if (!value || /^javascript:/i.test(value)) continue
+
+            const candidate = absoluteUrl(value, detailUrl)
+            if (
+                /^https?:\/\/(?:www\.)?recordplay\.biz\/e\//i.test(candidate) ||
+                /^https?:\/\/(?:www\.)?playrecord\.biz\/embed\//i.test(candidate)
+            ) {
+                playerUrl = candidate
+                break
+            }
+        }
+    })
+
+    // 部分懒加载插件会把属性保留在原始 HTML 中，使用正则作为最后兜底。
+    if (!playerUrl) {
+        const match = String(html || '').match(
+            /(?:data-link|data-src|src)=["']((?:https?:)?\/\/(?:www\.)?(?:recordplay\.biz\/e|playrecord\.biz\/embed)\/[^"']+)["']/i
+        )
+        if (match) playerUrl = absoluteUrl(match[1], detailUrl)
+    }
+
+    // 再从整页脚本或内联 JSON 中寻找地址，兼容播放器不直接写在 iframe 属性中的情况。
+    if (!playerUrl) {
+        const normalizedHtml = String(html || '')
+            .replace(/\\\//g, '/')
+            .replace(/&amp;/g, '&')
+            .replace(/&#0*38;/gi, '&')
+        const match = normalizedHtml.match(
+            /https?:\/\/(?:www\.)?(?:recordplay\.biz\/e|playrecord\.biz\/embed)\/[a-z0-9_-]+(?:\?[^\s"'<>]*)?/i
+        )
+        if (match) playerUrl = match[0]
+    }
+    return playerUrl
 }
 
 /**
@@ -250,14 +282,13 @@ function firstPlaylistResource(playlist, playlistUrl) {
 }
 
 /**
- * 在 XPTV 当前网络中逐级探测主清单、子清单和首个视频分片。
+ * 在 XPTV 当前网络中探测主清单和子清单结构。
  *
  * @param {string} url 主清单地址
- * @return {Promise<boolean>} 当前线路是否能读取视频数据
+ * @return {Promise<boolean>} 当前线路是否提供有效 HLS 清单
  */
 async function probeHls(url) {
     try {
-        const requestHeaders = { 'User-Agent': UA }
         const master = await requestHtml(url, '')
         if (!/#EXTM3U/i.test(master)) return false
 
@@ -269,20 +300,8 @@ async function probeHls(url) {
         const segmentUrl = firstPlaylistResource(child, childUrl)
         if (!segmentUrl) return false
 
-        // 只读取首个分片的前 1KB，验证手机网络可用性，避免预检下载整个视频分片。
-        const response = await $fetch.get(segmentUrl, {
-            headers: {
-                ...requestHeaders,
-                Range: 'bytes=0-1023',
-            },
-            responseType: 'arraybuffer',
-            timeout: 10000,
-        })
-        const data = response && response.data
-        if (data == null) return false
-        if (typeof data === 'string') return data.length > 0
-        if (typeof data.byteLength === 'number') return data.byteLength > 0
-        if (typeof data.length === 'number') return data.length > 0
+        // XPTV 的 $fetch 对二进制 TS 可能返回空字符串，不能据此判断原生播放器不可用。
+        // 主、子清单均有效且存在分片地址时，交给原生播放器实际读取媒体数据。
         return true
     } catch (_) {
         return false
@@ -329,21 +348,11 @@ async function getTracks(ext) {
 
     try {
         const html = await requestHtml(detailUrl)
-        const $ = cheerio.load(html)
-        let playerUrl =
-            $('iframe[src*="recordplay"], iframe[data-src*="recordplay"], iframe[src], iframe[data-src]')
-                .first()
-                .attr('src') ||
-            $('iframe[src*="recordplay"], iframe[data-src*="recordplay"], iframe[src], iframe[data-src]')
-                .first()
-                .attr('data-src') ||
-            ''
-        playerUrl = absoluteUrl(playerUrl, detailUrl)
+        const playerUrl = extractPlayerUrl(html, detailUrl)
 
         // 优先信任已经解析出的播放器，正常详情页可能包含 Cloudflare 的通用组件代码。
         if (!playerUrl && isChallengePage(html)) throw new Error('SexBJCam 返回了 Cloudflare 详情验证页')
         if (!playerUrl) throw new Error('详情页没有找到播放器 iframe')
-        $utils.toastError('运行轨迹 stage=getTracks detail=playerReady')
 
         return jsonify({
             list: [
@@ -373,14 +382,12 @@ async function getPlayinfo(ext) {
     ext = argsify(ext)
     const playerUrl = absoluteUrl(ext.playerUrl || ext.url || '')
     const detailUrl = absoluteUrl(ext.detailUrl || `${appConfig.site}/`)
-    $utils.toastError('运行轨迹 stage=getPlayinfo detail=start')
 
     try {
-        const html = await requestPlayerHtml(playerUrl, detailUrl)
-        $utils.toastError(`运行轨迹 stage=playerHtml detail=${html.length}`)
+        // 播放器必须由手机直取，使临时 HLS 签名与原生播放器使用相同的网络出口。
+        const html = await requestHtml(playerUrl, detailUrl)
         const mediaUrls = extractMediaUrls(html, playerUrl)
         if (mediaUrls.length === 0) throw new Error('播放器未解析到 M3U8 地址')
-        $utils.toastError(`运行轨迹 stage=mediaUrls detail=${mediaUrls.length}`)
 
         let playUrl = ''
         const probeResults = []
@@ -389,16 +396,12 @@ async function getPlayinfo(ext) {
             const candidate = mediaUrls[index]
             const available = await probeHls(candidate)
             probeResults.push(`${index + 1}:${available ? 'ok' : 'fail'}`)
-            $utils.toastError(`运行轨迹 stage=probe detail=${probeResults.join(',')}`)
             if (available) {
                 playUrl = candidate
                 break
             }
         }
-        if (!playUrl) throw new Error(`三条 HLS 线路的分片都不可用（${probeResults.join(',')}）`)
-
-        // 调试版本临时显示手机端检测结果，用于区分脚本请求与原生播放器的网络差异。
-        $utils.toastError(`播放线路检测 ${probeResults.join(',')}（1=hls2 2=hls3 3=hls4）`)
+        if (!playUrl) throw new Error(`三条 HLS 线路都不可用（${probeResults.join(',')}）`)
 
         return jsonify({
             urls: [playUrl],
