@@ -4,7 +4,7 @@ const UA =
     'Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1'
 
 const appConfig = {
-    ver: 2026090901,
+    ver: 2026090903,
     title: '有爱爱',
     site: 'https://www.uaa2610.com',
     tabs: [
@@ -60,7 +60,7 @@ function isChallengePage(html) {
 /**
  * 打开一次浏览器验证页；认证完成后回到 XPTV 刷新列表即可。
  */
-function openVerification(url) {
+async function openVerification(url) {
     if (
         verificationOpened ||
         typeof $utils === 'undefined' ||
@@ -71,42 +71,60 @@ function openVerification(url) {
 
     verificationOpened = true
     $print('有爱爱需要完成一次浏览器验证，验证后请返回并刷新列表')
-    $utils.openSafari(url, UA)
+    $utils.toastError('请完成人机认证，返回后将自动重试')
+    // 某些 XPTV 版本会等待浏览器返回；使用 await 后可继续重试原请求。
+    await $utils.openSafari(url, UA)
 }
 
 /**
- * 统一请求网页，并在 Cloudflare 拦截时触发一次浏览器认证。
+ * 执行一次网页请求。
+ */
+async function fetchHtml(url, referer) {
+    const response = await $fetch.get(url, {
+        headers: {
+            'User-Agent': UA,
+            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            Referer: referer,
+            'Cache-Control': 'no-cache',
+            Pragma: 'no-cache',
+        },
+    })
+    return String(response.data || '')
+}
+
+/**
+ * 统一请求网页；首次遇到 Cloudflare 时认证，并在返回 XPTV 后自动重试。
  */
 async function requestHtml(url, referer = appConfig.site + '/') {
-    try {
-        const response = await $fetch.get(url, {
-            headers: {
-                'User-Agent': UA,
-                Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-                Referer: referer,
-                'Cache-Control': 'no-cache',
-                Pragma: 'no-cache',
-            },
-        })
-        const html = String(response.data || '')
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+            const html = await fetchHtml(url, referer)
+            if (!isChallengePage(html)) {
+                $print(`运行轨迹 stage=uuaHttpOk detail=length:${html.length}`)
+                return html
+            }
 
-        // 验证页不能交给列表解析器，否则只会得到空列表。
-        if (isChallengePage(html)) {
-            openVerification(url)
-            throw new Error('NEED_BROWSER_VERIFICATION')
-        }
-        return html
-    } catch (error) {
-        const message = String(error || '')
+            $print(`运行轨迹 stage=uuaChallenge detail=attempt:${attempt + 1}`)
+            if (attempt === 0) {
+                await openVerification(url)
+                continue
+            }
+        } catch (error) {
+            const message = String(error || '')
+            if (!/403|Forbidden|Cloudflare|Just a moment/i.test(message)) throw error
 
-        // 部分 XPTV 版本会直接把 403 当作异常，仍需进入同一认证流程。
-        if (/403|Forbidden|Cloudflare|Just a moment/i.test(message)) {
-            openVerification(url)
-            throw new Error('NEED_BROWSER_VERIFICATION')
+            // 部分 XPTV 版本会直接把 403 当作异常，认证返回后再请求一次。
+            $print(`运行轨迹 stage=uua403 detail=attempt:${attempt + 1}`)
+            if (attempt === 0) {
+                await openVerification(url)
+                continue
+            }
         }
-        throw error
     }
+
+    $utils.toastError('认证Cookie未共享：XPTV仍被403拦截')
+    throw new Error('NEED_BROWSER_VERIFICATION')
 }
 
 /**
@@ -177,7 +195,13 @@ async function getCards(ext) {
     try {
         const html = await requestHtml(url)
         const cards = parseCards(html)
-        if (!cards.length) $print(`有爱爱列表未解析到内容：${url}`)
+        if (!cards.length) {
+            const title = cheerio.load(html)('title').text().replace(/\s+/g, ' ').trim()
+            $print(`运行轨迹 stage=uuaParseEmpty detail=title:${title || 'none'},length:${html.length}`)
+            $utils.toastError('网页已加载，但列表DOM解析为空')
+        } else {
+            $print(`运行轨迹 stage=uuaCardsOk detail=count:${cards.length}`)
+        }
         return jsonify({ list: cards })
     } catch (error) {
         if (!String(error).includes('NEED_BROWSER_VERIFICATION')) {
