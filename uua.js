@@ -3,64 +3,19 @@ const cheerio = createCheerio()
 const UA =
     'Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1'
 
-const headers = {
-    'User-Agent': UA,
-    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-    'Cache-Control': 'no-cache',
-    Pragma: 'no-cache',
-}
-
-// 官方地址发布页列出的新线路优先，主域名作为最后回退。
-const mirrorSites = [
-    'https://www.uaa2610.com',
-    'https://www.uaa2609.com',
-    'https://www.uaa2608.com',
-    'https://www.uaa.com',
-]
-
-let activeSite = mirrorSites[0]
-let challengeOpened = false
-
 const appConfig = {
-    ver: 2026090402,
+    ver: 2026090901,
     title: '有爱爱',
-    // 保留字面量，便于通用检测脚本直接识别当前首选域名。
     site: 'https://www.uaa2610.com',
     tabs: [
-        {
-            name: '国产视频',
-            ui: 1,
-            ext: {
-                tip: 'chinese-av-porn',
-                origin: 1,
-            },
-        },
-        {
-            name: '日本AV',
-            ui: 1,
-            ext: {
-                tip: 'jav',
-                origin: 1,
-            },
-        },
-        {
-            name: '无码流出',
-            ui: 1,
-            ext: {
-                category: '无码流出',
-                origin: 2,
-            },
-        },
-        {
-            name: 'H动漫',
-            ui: 1,
-            ext: {
-                origin: 3,
-            },
-        },
+        { name: '国产视频', ui: 1, ext: { tip: 'chinese-av-porn', origin: 1 } },
+        { name: '日本AV', ui: 1, ext: { tip: 'jav', origin: 1 } },
+        { name: '无码流出', ui: 1, ext: { category: '无码流出', origin: 2 } },
+        { name: 'H动漫', ui: 1, ext: { origin: 3 } },
     ],
 }
+
+let verificationOpened = false
 
 /**
  * 返回扩展配置。
@@ -70,129 +25,126 @@ async function getConfig() {
 }
 
 /**
- * 取得完整地址中的协议和主机部分。
+ * 返回当前站点的来源地址。
  */
 function getOrigin(url) {
     const match = String(url || '').match(/^(https?:\/\/[^/]+)/i)
-    return match ? match[1] : activeSite
+    return match ? match[1] : appConfig.site
 }
 
 /**
- * 将相对地址转换为完整地址。
+ * 把站内相对地址补全为绝对地址。
  */
-function absoluteUrl(url, site = activeSite) {
-    const value = String(url || '').replace(/&amp;/g, '&').trim()
+function absoluteUrl(url, baseUrl = appConfig.site) {
+    const value = String(url || '')
+        .replace(/&amp;/g, '&')
+        .replace(/\\\//g, '/')
+        .trim()
     if (!value) return ''
     if (value.startsWith('//')) return `https:${value}`
     if (/^https?:\/\//i.test(value)) return value
-    return `${site}${value.startsWith('/') ? '' : '/'}${value}`
+    return `${getOrigin(baseUrl)}${value.startsWith('/') ? '' : '/'}${value}`
 }
 
 /**
- * 判断响应内容是否为 Cloudflare 人机验证页。
+ * 判断网页是否为 Cloudflare 验证或拦截页面。
  */
 function isChallengePage(html) {
     const text = String(html || '')
     return (
-        /<title>\s*(?:Just a moment|请稍候)/i.test(text) ||
-        /challenge-platform|cf-chl-|Performing security verification/i.test(text)
+        /<title>\s*(?:Just a moment|Attention Required|请稍候)/i.test(text) ||
+        /window\._cf_chl_opt\b|id=["']challenge-form["']|cf-error-details/i.test(text)
     )
 }
 
 /**
- * 只打开一次内置浏览器，让用户完成 Cloudflare 验证。
+ * 打开一次浏览器验证页；认证完成后回到 XPTV 刷新列表即可。
  */
-function openChallengePage(url) {
+function openVerification(url) {
     if (
-        challengeOpened ||
+        verificationOpened ||
         typeof $utils === 'undefined' ||
         typeof $utils.openSafari !== 'function'
     ) {
         return
     }
 
-    challengeOpened = true
+    verificationOpened = true
+    $print('有爱爱需要完成一次浏览器验证，验证后请返回并刷新列表')
     $utils.openSafari(url, UA)
 }
 
 /**
- * 为站内地址生成镜像候选，保留原路径和查询参数。
+ * 统一请求网页，并在 Cloudflare 拦截时触发一次浏览器认证。
  */
-function buildCandidateUrls(target) {
-    const value = String(target || '').trim()
-    const path = /^https?:\/\//i.test(value)
-        ? value.replace(/^https?:\/\/(?:www\.)?uaa\d*\.com/i, '')
-        : value
-    const candidates = []
-    const preferredSites = [activeSite, ...mirrorSites]
+async function requestHtml(url, referer = appConfig.site + '/') {
+    try {
+        const response = await $fetch.get(url, {
+            headers: {
+                'User-Agent': UA,
+                Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                Referer: referer,
+                'Cache-Control': 'no-cache',
+                Pragma: 'no-cache',
+            },
+        })
+        const html = String(response.data || '')
 
-    preferredSites.forEach((site) => {
-        const url = absoluteUrl(path, site)
-        if (candidates.indexOf(url) < 0) candidates.push(url)
-    })
-    return candidates
+        // 验证页不能交给列表解析器，否则只会得到空列表。
+        if (isChallengePage(html)) {
+            openVerification(url)
+            throw new Error('NEED_BROWSER_VERIFICATION')
+        }
+        return html
+    } catch (error) {
+        const message = String(error || '')
+
+        // 部分 XPTV 版本会直接把 403 当作异常，仍需进入同一认证流程。
+        if (/403|Forbidden|Cloudflare|Just a moment/i.test(message)) {
+            openVerification(url)
+            throw new Error('NEED_BROWSER_VERIFICATION')
+        }
+        throw error
+    }
 }
 
 /**
- * 请求站内 HTML；当前线路异常或遇到验证页时自动尝试其他官方镜像。
+ * 构造分类列表地址，并修复原脚本中的 $sort 参数错误。
  */
-async function requestHtml(target, refererPath = '/') {
-    const candidates = buildCandidateUrls(target)
-    let lastError = null
-    let challengeUrl = ''
-
-    for (const url of candidates) {
-        const site = getOrigin(url)
-        try {
-            const { data } = await $fetch.get(url, {
-                headers: {
-                    ...headers,
-                    Referer: absoluteUrl(refererPath, site),
-                    'Sec-Fetch-Dest': 'document',
-                    'Sec-Fetch-Mode': 'navigate',
-                    'Sec-Fetch-Site': 'same-origin',
-                },
-            })
-            if (isChallengePage(data)) {
-                if (!challengeUrl) challengeUrl = url
-                lastError = new Error(`${site} 返回 Cloudflare 验证页`)
-                continue
-            }
-
-            activeSite = site
-            appConfig.site = site
-            return { data, url, site }
-        } catch (error) {
-            // 某些运行环境会直接把 403 当成异常，因此同时检查错误文字。
-            if (!challengeUrl && /403|Forbidden|Cloudflare|Just a moment/i.test(String(error || ''))) {
-                challengeUrl = url
-            }
-            lastError = error
-        }
+function buildListUrl(ext) {
+    const page = Math.max(1, Number(ext.page || 1))
+    const params = []
+    if (ext.category) params.push(`category=${encodeURIComponent(ext.category)}`)
+    if (ext.origin) params.push(`origin=${encodeURIComponent(ext.origin)}`)
+    if (page > 1) {
+        params.push('sort=1')
+        params.push(`page=${page}`)
     }
 
-    // 所有镜像都失败后再打开验证页，避免切换线路时连续弹出多个网页。
-    if (challengeUrl) openChallengePage(challengeUrl)
-    throw lastError || new Error('全部官方线路均无法访问')
+    const path = ext.tip ? `/${ext.tip}` : '/video/list'
+    return `${appConfig.site}${path}${params.length ? `?${params.join('&')}` : ''}`
 }
 
 /**
- * 解析视频列表卡片并补全详情和海报地址。
+ * 从列表 HTML 中解析视频卡片。
  */
-function parseCards(html, pageUrl) {
+function parseCards(html) {
     const cards = []
     const seen = {}
-    const site = getOrigin(pageUrl)
     const $ = cheerio.load(html)
 
-    $('li.video_li').each((_, element) => {
+    $('li.video_li, .video_li').each((_, element) => {
         const item = $(element)
-        const link = item.find('.title a[href], .cover_box a[href]').first()
-        const href = link.attr('href') || item.find('.cover_box a[href]').first().attr('href')
+        const link = item.find('.title a[href], .cover_box a[href], a[href]').first()
+        const href = link.attr('href') || ''
         if (!href || seen[href]) return
 
-        const title = item.find('.title a').first().text().replace(/\s+/g, ' ').trim()
-        const image = item.find('img.cover').first()
+        const title =
+            item.find('.title a, .title').first().text().replace(/\s+/g, ' ').trim() ||
+            link.attr('title') ||
+            ''
+        const image = item.find('img.cover, .cover_box img, img').first()
         const cover =
             image.attr('src') ||
             image.attr('data-cfsrc') ||
@@ -201,13 +153,13 @@ function parseCards(html, pageUrl) {
             ''
         if (!title) return
 
-        const pubdate = item.find('.info_box .view span').first().text().trim()
-        const detailUrl = absoluteUrl(href, site)
+        const detailUrl = absoluteUrl(href)
+        const pubdate = item.find('.info_box .view span, .info_box span, span').first().text().trim()
         seen[href] = true
         cards.push({
             vod_id: detailUrl,
             vod_name: title,
-            vod_pic: absoluteUrl(cover, site),
+            vod_pic: absoluteUrl(cover),
             vod_pubdate: pubdate,
             ext: { url: detailUrl },
         })
@@ -216,41 +168,27 @@ function parseCards(html, pageUrl) {
 }
 
 /**
- * 构造分类分页路径，修复旧脚本误写的 $sort 参数。
- */
-function buildListPath(ext) {
-    const page = Number(ext.page || 1)
-    const params = []
-
-    if (ext.origin) params.push(`origin=${encodeURIComponent(ext.origin)}`)
-    if (ext.category) params.push(`category=${encodeURIComponent(ext.category)}`)
-    if (page > 1) {
-        params.push('sort=1')
-        params.push(`page=${page}`)
-    }
-
-    if (ext.tip) {
-        return `/${ext.tip}${params.length ? `?${params.join('&')}` : ''}`
-    }
-    return `/video/list${params.length ? `?${params.join('&')}` : ''}`
-}
-
-/**
  * 加载分类列表。
  */
 async function getCards(ext) {
     ext = argsify(ext)
+    const url = buildListUrl(ext)
+
     try {
-        const response = await requestHtml(buildListPath(ext), '/video/list')
-        return jsonify({ list: parseCards(response.data, response.url) })
+        const html = await requestHtml(url)
+        const cards = parseCards(html)
+        if (!cards.length) $print(`有爱爱列表未解析到内容：${url}`)
+        return jsonify({ list: cards })
     } catch (error) {
-        $print(`有爱爱列表请求失败：${error}`)
+        if (!String(error).includes('NEED_BROWSER_VERIFICATION')) {
+            $print(`有爱爱列表请求失败：${error}`)
+        }
         return jsonify({ list: [] })
     }
 }
 
 /**
- * 从详情页播放器节点或内联脚本中提取媒体地址。
+ * 从详情页播放器节点或脚本中提取媒体地址。
  */
 function extractPlayUrl(html, pageUrl) {
     const $ = cheerio.load(html)
@@ -263,22 +201,31 @@ function extractPlayUrl(html, pageUrl) {
         ''
 
     if (!playUrl) {
-        const match = String(html).match(
-            /(?:src|url|playUrl|videoUrl)\s*[:=]\s*['"]([^'"]+\.(?:m3u8|mp4)(?:\?[^'"]*)?)['"]/i
-        )
-        playUrl = match && match[1] ? match[1] : ''
+        const patterns = [
+            /(?:playUrl|videoUrl|url|src)\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)(?:\?[^"']*)?)["']/i,
+            /["']file["']\s*:\s*["']([^"']+)["']/i,
+        ]
+        for (const pattern of patterns) {
+            const match = String(html).match(pattern)
+            if (match && match[1]) {
+                playUrl = match[1]
+                break
+            }
+        }
     }
-    return absoluteUrl(playUrl, getOrigin(pageUrl))
+    return absoluteUrl(playUrl, pageUrl)
 }
 
 /**
- * 加载详情页并生成播放线路。
+ * 加载视频详情并生成播放线路。
  */
 async function getTracks(ext) {
     ext = argsify(ext)
+    const pageUrl = absoluteUrl(ext.url)
+
     try {
-        const response = await requestHtml(ext.url, '/video/list')
-        const playUrl = extractPlayUrl(response.data, response.url)
+        const html = await requestHtml(pageUrl, appConfig.site + '/')
+        const playUrl = extractPlayUrl(html, pageUrl)
         if (!playUrl) throw new Error('详情页没有找到 m3u8 或 mp4 地址')
 
         return jsonify({
@@ -289,32 +236,35 @@ async function getTracks(ext) {
                         {
                             name: '播放',
                             pan: '',
-                            ext: {
-                                url: playUrl,
-                                referer: response.url,
-                            },
+                            ext: { url: playUrl, referer: pageUrl },
                         },
                     ],
                 },
             ],
         })
     } catch (error) {
-        $print(`有爱爱播放解析失败：${error}`)
+        if (!String(error).includes('NEED_BROWSER_VERIFICATION')) {
+            $print(`有爱爱详情解析失败：${error}`)
+        }
         return jsonify({ list: [] })
     }
 }
 
 /**
- * 返回播放器需要的媒体地址和来源请求头。
+ * 返回媒体地址及防盗链请求头。
  */
 async function getPlayinfo(ext) {
     ext = argsify(ext)
+    const playUrl = absoluteUrl(ext.url, ext.referer || appConfig.site)
+    const referer = ext.referer || appConfig.site + '/'
+
     return jsonify({
-        urls: [ext.url],
+        urls: [playUrl],
         headers: [
             {
                 'User-Agent': UA,
-                Referer: ext.referer || `${activeSite}/`,
+                Referer: referer,
+                Origin: getOrigin(referer),
             },
         ],
     })
@@ -326,14 +276,16 @@ async function getPlayinfo(ext) {
 async function search(ext) {
     ext = argsify(ext)
     const text = encodeURIComponent(ext.text || '')
-    const page = Number(ext.page || 1)
-    const path = `/video/list?searchType=1&keyword=${text}&category=&origin=&tag=&sort=0&page=${page}`
+    const page = Math.max(1, Number(ext.page || 1))
+    const url = `${appConfig.site}/video/list?searchType=1&keyword=${text}&category=&origin=&tag=&sort=0&page=${page}`
 
     try {
-        const response = await requestHtml(path, '/video/list')
-        return jsonify({ list: parseCards(response.data, response.url) })
+        const html = await requestHtml(url)
+        return jsonify({ list: parseCards(html) })
     } catch (error) {
-        $print(`有爱爱搜索请求失败：${error}`)
+        if (!String(error).includes('NEED_BROWSER_VERIFICATION')) {
+            $print(`有爱爱搜索请求失败：${error}`)
+        }
         return jsonify({ list: [] })
     }
 }
