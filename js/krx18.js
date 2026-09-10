@@ -16,7 +16,7 @@ const htmlHeaders = {
 const PLAY_PROXY = 'https://krx18-control.blessedlymm.workers.dev'
 
 const appConfig = {
-    ver: 2026091013,
+    ver: 2026091015,
     title: 'KRX18',
     // www.krx18.com 会跳转到该主域名，统一使用跳转后的地址可避免跨域重定向。
     site: 'https://krx18.com',
@@ -97,6 +97,26 @@ function getPlayableUrl(url, referer) {
     return `${proxy}/manifest.m3u8?url=${encodeURIComponent(playlistUrl)}&referer=${encodeURIComponent(
         referer || ''
     )}&_xptv=${Date.now()}`
+}
+
+/**
+ * 本地诊断时让直连媒体先经过一次 307 记录入口，随后仍由手机访问真实地址。
+ *
+ * @param {string} url 真实媒体地址
+ * @param {string} kind 媒体类型
+ * @param {object} meta 线路诊断信息
+ * @returns {string} 正式地址或本地诊断跳转地址
+ */
+function getDiagnosticMediaUrl(url, kind, meta = {}) {
+    const mediaUrl = String(url || '').trim()
+    const proxy = String(PLAY_PROXY || '').replace(/\/+$/, '')
+    if (!mediaUrl || !proxy || /\.workers\.dev$/i.test(proxy)) return mediaUrl
+
+    // 只在本地诊断脚本生效，不改变 GitHub 正式脚本的直连行为。
+    const suffix = kind === 'm3u8' ? 'm3u8' : kind === 'mp4' ? 'mp4' : 'bin'
+    return `${proxy}/direct.${suffix}?url=${encodeURIComponent(mediaUrl)}&line=${encodeURIComponent(
+        meta.number || ''
+    )}&name=${encodeURIComponent(meta.name || '')}&kind=${encodeURIComponent(kind || 'unknown')}`
 }
 
 /**
@@ -457,6 +477,77 @@ async function resolveAbyssSources(embedUrl) {
 }
 
 /**
+ * 从常见外部播放器 HTML 中提取未混淆的 HLS 或 MP4 地址。
+ *
+ * @param {string} html 播放器页面源码
+ * @param {string} embedUrl 播放器页面地址
+ * @returns {Array<{url: string, type: string}>} 去重后的媒体候选
+ */
+function extractExternalMediaUrls(html, embedUrl) {
+    const normalized = String(html || '')
+        .replace(/\\u002f/gi, '/')
+        .replace(/\\\//g, '/')
+        .replace(/&amp;/gi, '&')
+    const candidates = []
+    const seen = {}
+    const patterns = [
+        /https?:\/\/[^"'<>\s]+?\.m3u8(?:\?[^"'<>\s]*)?/gi,
+        /https?:\/\/[^"'<>\s]+?\.mp4(?:\?[^"'<>\s]*)?/gi,
+        /(?:file|src|source)\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)(?:\?[^"']*)?)["']/gi,
+    ]
+
+    patterns.forEach((pattern) => {
+        let match
+        while ((match = pattern.exec(normalized))) {
+            try {
+                const url = absoluteUrl(match[1] || match[0], embedUrl)
+                if (!/^https?:\/\//i.test(url) || seen[url]) continue
+                seen[url] = true
+                candidates.push({
+                    url,
+                    type: /\.m3u8(?:[?#]|$)/i.test(url) ? 'm3u8' : 'mp4',
+                })
+            } catch (_) {
+                // 单个候选格式错误时继续检查页面中的其他地址。
+            }
+        }
+    })
+    return candidates
+}
+
+/**
+ * 由手机读取外部播放器页面，并记录页面特征与可见媒体候选。
+ *
+ * @param {string} embedUrl 外部播放器地址
+ * @param {string} detailUrl KRX18 详情页地址
+ * @param {object} meta 线路诊断信息
+ * @returns {Promise<{url: string, type: string, referer: string}>} 可播放媒体信息
+ */
+async function resolveExternalMedia(embedUrl, detailUrl, meta = {}) {
+    const { data } = await $fetch.get(embedUrl, {
+        headers: {
+            ...htmlHeaders,
+            Referer: detailUrl,
+            'Sec-Fetch-Dest': 'iframe',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'cross-site',
+        },
+    })
+    const html = String(data || '')
+    const candidates = extractExternalMediaUrls(html, embedUrl)
+    await traceRuntime(
+        'externalPage',
+        `line=${meta.number || ''}|name=${meta.name || ''}|host=${getOrigin(embedUrl)}|bytes=${html.length}|candidates=${
+            candidates.length
+        }|packed=${/eval\s*\(\s*function\s*\(p,a,c,k,e/i.test(html)}|cf=${/Just a moment|cf-chl|challenge-platform/i.test(
+            html
+        )}|urls=${candidates.map((item) => item.url).join(',')}`.slice(0, 900)
+    )
+    if (!candidates.length) throw new Error(`外部播放器 ${getOrigin(embedUrl)} 未发现明文媒体地址`)
+    return { ...candidates[0], referer: embedUrl }
+}
+
+/**
  * 加载详情页、解析服务器，并生成可直接播放的 HLS 或完整媒体线路。
  */
 async function getTracks(ext) {
@@ -486,30 +577,18 @@ async function getTracks(ext) {
                 server: cleanText(item.find('.server').text()),
             })
         })
+        await traceRuntime(
+            'trackOptions',
+            options.map((item) => `${item.number}:${item.name || item.server || 'unknown'}`).join(',').slice(0, 500)
+        )
 
         for (const option of options) {
-            if (String(option.number) === '1') {
-                // Server 1 先进入线路列表，Dooplay 地址和 HLS 均延迟到点击播放时解析。
-                const trackKey = `dooplay:${option.post}:${option.type}:${option.number}`
-                if (!seen[trackKey]) {
-                    seen[trackKey] = true
-                    tracks.push({
-                        name: option.name || 'Server 1',
-                        pan: '',
-                        ext: {
-                            resolver: 'playkrx18',
-                            detailUrl,
-                            post: option.post,
-                            number: option.number,
-                            type: option.type,
-                        },
-                    })
-                }
-                continue
-            }
-
             try {
                 const embedUrl = await requestEmbedUrl(option, detailUrl)
+                await traceRuntime(
+                    'trackEmbed',
+                    `line=${option.number}|name=${option.name || option.server || ''}|url=${embedUrl || 'empty'}`.slice(0, 500)
+                )
                 if (!embedUrl) continue
 
                 if (/\.(?:m3u8|mp4)(?:[?#]|$)/i.test(embedUrl)) {
@@ -518,7 +597,13 @@ async function getTracks(ext) {
                         tracks.push({
                             name: option.name,
                             pan: '',
-                            ext: { url: embedUrl, referer: detailUrl },
+                            ext: {
+                                resolver: 'direct',
+                                url: embedUrl,
+                                referer: detailUrl,
+                                number: option.number,
+                                serverName: option.name,
+                            },
                         })
                     }
                     continue
@@ -536,17 +621,54 @@ async function getTracks(ext) {
                             resolver: 'playkrx18',
                             embedUrl,
                             detailUrl,
+                            number: option.number,
+                            serverName: option.name,
                         },
                     })
                     continue
                 }
 
                 if (/mov18plus\.cloud|abyss/i.test(embedUrl)) {
-                    // Abyss 返回的地址仍需 Service Worker 在线解密，直接交给原生播放器会永久加载。
-                    $print(`KRX18 已跳过不兼容的加密线路：${option.name}`)
+                    const trackKey = `abyss:${embedUrl}`
+                    if (!seen[trackKey]) {
+                        seen[trackKey] = true
+                        tracks.push({
+                            name: option.name,
+                            pan: '',
+                            ext: {
+                                resolver: 'abyss',
+                                embedUrl,
+                                detailUrl,
+                                number: option.number,
+                                serverName: option.name,
+                            },
+                        })
+                    }
+                    continue
+                }
+
+                // 其他外部播放器先保留为可点击线路，点击后由手机抓取页面并记录解析特征。
+                const trackKey = `external:${embedUrl}`
+                if (!seen[trackKey]) {
+                    seen[trackKey] = true
+                    tracks.push({
+                        name: option.name,
+                        pan: '',
+                        ext: {
+                            resolver: 'external',
+                            embedUrl,
+                            detailUrl,
+                            number: option.number,
+                            serverName: option.name,
+                        },
+                    })
                 }
             } catch (error) {
                 // 单条服务器失效时继续尝试其余服务器，避免整个详情页无结果。
+                await traceRuntime(
+                    'trackResolveError',
+                    `line=${option.number}|name=${option.name || ''}|error=${String(error)}`.slice(0, 500)
+                )
                 $print(`KRX18 ${option.name} 解析失败：${error}`)
             }
         }
@@ -568,7 +690,12 @@ async function getTracks(ext) {
  */
 async function getPlayinfo(ext) {
     ext = argsify(ext)
-    await traceRuntime('getPlayinfo', ext.resolver || ext.url || 'empty')
+    await traceRuntime(
+        'getPlayinfo',
+        `resolver=${ext.resolver || 'unknown'}|line=${ext.number || ''}|name=${ext.serverName || ''}|url=${
+            ext.embedUrl || ext.url || 'empty'
+        }`.slice(0, 500)
+    )
     if (ext.resolver === 'playkrx18') {
         try {
             // 点击线路后再调用播放接口，此时即使解析失败也不会影响线路页面展示。
@@ -582,9 +709,12 @@ async function getPlayinfo(ext) {
                     },
                     ext.detailUrl
                 ))
-            await traceRuntime('embedUrlReady', getOrigin(embedUrl))
+            await traceRuntime(
+                'embedUrlReady',
+                `line=${ext.number || ''}|name=${ext.serverName || ''}|url=${embedUrl}`.slice(0, 500)
+            )
             if (!/play\.playkrx18\.site\/play\//i.test(embedUrl)) {
-                throw new Error('Server 1 未返回有效的播放页地址')
+                throw new Error('当前线路未返回 play.playkrx18.site 播放页')
             }
             const source = await resolvePlayKrx18(embedUrl, ext.detailUrl)
             // Worker 只代取与出口绑定的 M3U8 文本；清单中的视频分片保持上游地址，
@@ -608,8 +738,62 @@ async function getPlayinfo(ext) {
         }
     }
 
+    if (ext.resolver === 'abyss') {
+        try {
+            const sources = await resolveAbyssSources(ext.embedUrl)
+            await traceRuntime(
+                'abyssSources',
+                `line=${ext.number || ''}|name=${ext.serverName || ''}|count=${sources.length}|urls=${sources
+                    .map((item) => `${item.name}:${item.url}`)
+                    .join(',')}`.slice(0, 900)
+            )
+            if (!sources.length) throw new Error('Abyss 没有返回可作为完整文件播放的地址')
+            const source = sources[0]
+            return jsonify({
+                urls: [getDiagnosticMediaUrl(source.url, 'mp4', { number: ext.number, name: ext.serverName })],
+                type: 'mp4',
+                headers: [{ 'User-Agent': UA, Referer: ext.embedUrl }],
+            })
+        } catch (error) {
+            await traceRuntime('abyssError', String(error).slice(0, 500))
+            throw error
+        }
+    }
+
+    if (ext.resolver === 'external') {
+        try {
+            const source = await resolveExternalMedia(ext.embedUrl, ext.detailUrl, {
+                number: ext.number,
+                name: ext.serverName,
+            })
+            return jsonify({
+                urls: [getDiagnosticMediaUrl(source.url, source.type, { number: ext.number, name: ext.serverName })],
+                type: source.type,
+                headers: [{ 'User-Agent': UA, Referer: source.referer }],
+            })
+        } catch (error) {
+            await traceRuntime('externalError', String(error).slice(0, 500))
+            throw error
+        }
+    }
+
+    const directUrl = String(ext.url || '')
+    const directType = /\.m3u8(?:[?#]|$)/i.test(directUrl)
+        ? 'm3u8'
+        : /\.mp4(?:[?#]|$)/i.test(directUrl)
+          ? 'mp4'
+          : 'unknown'
+    const diagnosticUrl = getDiagnosticMediaUrl(directUrl, directType, {
+        number: ext.number,
+        name: ext.serverName,
+    })
+    await traceRuntime(
+        'getPlayinfoDirect',
+        `line=${ext.number || ''}|name=${ext.serverName || ''}|type=${directType}|url=${directUrl}`.slice(0, 500)
+    )
     return jsonify({
-        urls: [ext.url],
+        urls: [diagnosticUrl],
+        ...(directType !== 'unknown' ? { type: directType } : {}),
         headers: [
             {
                 'User-Agent': UA,
