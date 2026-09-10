@@ -4,7 +4,7 @@ const UA =
     'Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1'
 
 const appConfig = {
-    ver: 2026091001,
+    ver: 2026091008,
     title: '123AV-修改',
     site: 'https://123av.com',
     tabs: [
@@ -15,6 +15,11 @@ const appConfig = {
         { name: '无码', ui: 1, ext: { url: 'https://123av.com/cn/uncensored' } },
     ],
 }
+
+// 正式脚本保持空值；本地诊断服务只在返回脚本时注入日志接收地址，网站请求仍由手机直连。
+const DEBUG_LOGGER = ''
+// 本地诊断服务可临时注入媒体代理；正式版本保持直连，避免 Cloudflare 出口被媒体 CDN 封禁。
+const MEDIA_PROXY = ''
 
 const htmlHeaders = {
     'User-Agent': UA,
@@ -84,6 +89,74 @@ function cleanText(value) {
 }
 
 /**
+ * 把异常对象转换成可读文本，避免 XPTV 只显示 [object Object]。
+ *
+ * @param {*} error 捕获到的异常
+ * @return {string} 可展示的错误信息
+ */
+function formatError(error) {
+    if (typeof error === 'string') return error
+    if (!error) return '未知错误'
+
+    const detail = {}
+    ;['message', 'name', 'status', 'statusCode', 'code', 'url', 'data'].forEach((key) => {
+        if (error[key] === undefined || error[key] === null) return
+        let value
+        try {
+            value = typeof error[key] === 'string' ? error[key] : JSON.stringify(error[key])
+        } catch (_) {
+            value = String(error[key])
+        }
+        if (value === undefined) value = String(error[key])
+        detail[key] = value.length > 800 ? `${value.slice(0, 800)}…` : value
+    })
+    try {
+        if (Object.keys(detail).length) return JSON.stringify(detail)
+        return JSON.stringify(error)
+    } catch (_) {
+        return error.message || '无法序列化的请求错误'
+    }
+}
+
+/**
+ * 将手机侧诊断信息发送到电脑，仅传日志而不代理网站请求。
+ *
+ * @param {string} stage 诊断阶段
+ * @param {object} detail 诊断字段
+ * @return {Promise<void>}
+ */
+async function sendDiagnosticLog(stage, detail = {}) {
+    if (!DEBUG_LOGGER) return
+
+    try {
+        let payload = JSON.stringify(detail)
+        if (payload.length > 1800) payload = `${payload.slice(0, 1800)}…`
+        const url = `${DEBUG_LOGGER}/event?stage=${encodeURIComponent(stage)}&detail=${encodeURIComponent(payload)}`
+        await $fetch.get(url, {
+            headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+            timeout: 3000,
+        })
+    } catch (_) {
+        // 日志发送失败不能影响 XPTV 的正常解析和播放。
+    }
+}
+
+/**
+ * 提取 XPTV 不同网络实现可能返回的状态和响应长度。
+ *
+ * @param {object} response 请求响应
+ * @return {object} 简要响应信息
+ */
+function responseSummary(response) {
+    const data = response ? response.data : ''
+    const length = typeof data === 'string' ? data.length : data && data.byteLength ? data.byteLength : 0
+    return {
+        status: response ? response.status || response.statusCode || response.code || '' : '',
+        length,
+    }
+}
+
+/**
  * 判断返回内容是否为 Cloudflare 验证或封禁页。
  *
  * @param {string} html HTML 文本
@@ -103,16 +176,31 @@ function isChallengePage(html) {
  *
  * @param {string} url 页面地址
  * @param {string} referer 来源页
+ * @param {string} stage 诊断阶段
  * @return {Promise<string>} HTML 文本
  */
-async function requestHtml(url, referer = `${appConfig.site}/`) {
-    const response = await $fetch.get(url, {
-        headers: { ...htmlHeaders, Referer: referer },
-        timeout: 15000,
-    })
-    const html = typeof response.data === 'string' ? response.data : String(response.data || '')
-    if (isChallengePage(html)) throw new Error('123AV 返回 Cloudflare 验证页，请检查代理或认证 Cookie')
-    return html
+async function requestHtml(url, referer = `${appConfig.site}/`, stage = 'html') {
+    await sendDiagnosticLog(`${stage}:start`, { url, referer })
+    try {
+        // 这里始终请求真实站点，由手机网络和 Shadowrocket 决定出口。
+        const response = await $fetch.get(url, {
+            headers: { ...htmlHeaders, Referer: referer },
+            timeout: 15000,
+        })
+        const html = typeof response.data === 'string' ? response.data : String(response.data || '')
+        const challenge = isChallengePage(html)
+        await sendDiagnosticLog(`${stage}:response`, {
+            url,
+            ...responseSummary(response),
+            challenge,
+            title: cleanText((html.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1]),
+        })
+        if (challenge) throw new Error('123AV 返回 Cloudflare 验证页，请检查手机代理或认证 Cookie')
+        return html
+    } catch (error) {
+        await sendDiagnosticLog(`${stage}:error`, { url, error: formatError(error) })
+        throw error
+    }
 }
 
 /**
@@ -205,12 +293,18 @@ async function getCards(ext) {
     if (page > 1) url += `${url.includes('?') ? '&' : '?'}page=${page}`
 
     try {
-        const html = await requestHtml(url, `${appConfig.site}/cn/`)
+        const html = await requestHtml(url, `${appConfig.site}/cn/`, 'list')
         const list = parseCards(html, url)
+        await sendDiagnosticLog('list:parsed', {
+            count: list.length,
+            firstTitle: list.length ? list[0].vod_name : '',
+            firstUrl: list.length ? list[0].vod_id : '',
+        })
         if (!list.length) throw new Error('123AV 列表 DOM 未匹配，请反馈“列表 DOM 未匹配”')
         return jsonify({ list })
     } catch (error) {
-        $utils.toastError(String(error))
+        await sendDiagnosticLog('list:error', { url, error: formatError(error) })
+        $utils.toastError(formatError(error))
         return jsonify({ list: [] })
     }
 }
@@ -314,6 +408,30 @@ function normalizeMediaUrl(value, baseUrl) {
 }
 
 /**
+ * 为 HLS 地址增加单次播放标识，避免原生播放器复用网络中断后的失败缓存。
+ *
+ * @param {string} playUrl 原始播放地址
+ * @return {string} 带单次播放标识的地址
+ */
+function freshPlaybackUrl(playUrl) {
+    if (!/\.m3u8(?:[?#]|$)/i.test(playUrl)) return playUrl
+    const separator = playUrl.includes('?') ? '&' : '?'
+    return `${playUrl}${separator}_xptv=${Date.now()}`
+}
+
+/**
+ * 调试时把媒体交给本地兼容代理，正式脚本未配置代理时保持直连。
+ *
+ * @param {string} playUrl 原始媒体地址
+ * @param {string} referer 播放器来源页
+ * @return {string} 实际播放地址
+ */
+function compatiblePlaybackUrl(playUrl, referer) {
+    if (!MEDIA_PROXY || !/\/blah4\//i.test(playUrl)) return playUrl
+    return `${MEDIA_PROXY}/media?url=${encodeURIComponent(playUrl)}&referer=${encodeURIComponent(referer)}`
+}
+
+/**
  * 从 video、source 或内联脚本中提取直链媒体。
  *
  * @param {string} html 播放页 HTML
@@ -404,26 +522,38 @@ async function resolveJavPlayer(playerUrl) {
     const queryIndex = playerUrl.indexOf('?')
     const oldQuery = queryIndex >= 0 ? playerUrl.slice(queryIndex + 1) : ''
     const streamUrl = `${origin}/stream?${oldQuery ? `${oldQuery}&` : ''}id=${encodeURIComponent(idMatch[1])}`
-    const response = await $fetch.get(streamUrl, {
-        headers: {
-            'User-Agent': UA,
-            Accept: 'application/json',
-            Referer: playerUrl,
-            Origin: origin,
-            'Cache-Control': 'no-cache',
-            Pragma: 'no-cache',
-        },
-        timeout: 15000,
-    })
-    const payload = typeof response.data === 'string' ? JSON.parse(response.data) : response.data
-    const media = payload && payload.media ? payload.media : null
-    const playUrl = media ? normalizeMediaUrl(media.stream, origin) : ''
-    if (!playUrl) throw new Error('javplayer.cc stream 接口未返回媒体地址')
+    await sendDiagnosticLog('stream-api:start', { playerUrl, streamUrl, id: idMatch[1] })
+    try {
+        const response = await $fetch.get(streamUrl, {
+            headers: {
+                'User-Agent': UA,
+                Accept: 'application/json',
+                Referer: playerUrl,
+                Origin: origin,
+                'Cache-Control': 'no-cache',
+                Pragma: 'no-cache',
+            },
+            timeout: 15000,
+        })
+        const payload = typeof response.data === 'string' ? JSON.parse(response.data) : response.data
+        const media = payload && payload.media ? payload.media : null
+        const playUrl = media ? normalizeMediaUrl(media.stream, origin) : ''
+        await sendDiagnosticLog('stream-api:response', {
+            ...responseSummary(response),
+            apiStatus: payload && payload.status ? payload.status : '',
+            hasMedia: Boolean(playUrl),
+            mediaUrl: playUrl,
+        })
+        if (!playUrl) throw new Error('javplayer.cc stream 接口未返回媒体地址')
 
-    return {
-        playUrl,
-        subtitle: normalizeMediaUrl(media.vtt, origin),
-        referer: playerUrl,
+        return {
+            playUrl,
+            subtitle: normalizeMediaUrl(media.vtt, origin),
+            referer: playerUrl,
+        }
+    } catch (error) {
+        await sendDiagnosticLog('stream-api:error', { streamUrl, error: formatError(error) })
+        throw error
     }
 }
 
@@ -442,7 +572,8 @@ async function resolveSurritSource(encryptedUrl, detailUrl) {
 
     // 保持原接口的路径令牌格式，不对 Base64 中的字符重复编码。
     const token = xorEncode(fileName)
-    const response = await $fetch.get(`${SURRIT_SITE}/${token}`, {
+    const surritUrl = `${SURRIT_SITE}/${token}`
+    const response = await $fetch.get(surritUrl, {
         headers: { ...htmlHeaders, Referer: detailUrl, Origin: appConfig.site },
         timeout: 15000,
     })
@@ -467,7 +598,7 @@ async function getTracks(ext) {
     const detailUrl = absoluteUrl(ext.url)
 
     try {
-        const html = await requestHtml(detailUrl, `${appConfig.site}/cn/`)
+        const html = await requestHtml(detailUrl, `${appConfig.site}/cn/`, 'detail')
         const tracks = []
         const directUrl = extractDirectMedia(html, detailUrl)
         if (directUrl) {
@@ -476,6 +607,12 @@ async function getTracks(ext) {
 
         const $ = cheerio.load(html)
         const episodes = extractPlayerEpisodes(html)
+        await sendDiagnosticLog('detail:parsed', {
+            detailUrl,
+            episodes: episodes.length,
+            firstPlayerUrl: episodes.length ? episodes[0].url : '',
+            directMedia: Boolean(directUrl),
+        })
         for (let index = 0; index < episodes.length; index++) {
             // 详情阶段只保存播放器入口；真正点击播放时再获取媒体，避免 XPTV 缓存过期 M3U8。
             tracks.push({
@@ -520,7 +657,7 @@ async function getTracks(ext) {
         if (!tracks.length) {
             const frameUrl = absoluteUrl($('iframe[src*="player"], iframe[src*="embed"], iframe[src]').first().attr('src'), detailUrl)
             if (frameUrl) {
-                const frameHtml = await requestHtml(frameUrl, detailUrl)
+                const frameHtml = await requestHtml(frameUrl, detailUrl, 'iframe')
                 const frameMedia = extractDirectMedia(frameHtml, frameUrl)
                 if (frameMedia) tracks.push({ name: '播放器', pan: '', ext: { playUrl: frameMedia, referer: frameUrl } })
             }
@@ -529,7 +666,8 @@ async function getTracks(ext) {
         if (!tracks.length) throw new Error('123AV 详情页未找到可用播放器，请反馈“播放器 DOM 未匹配”')
         return jsonify({ list: [{ title: '默认分组', tracks }] })
     } catch (error) {
-        $utils.toastError(String(error))
+        await sendDiagnosticLog('detail:error', { detailUrl, error: formatError(error) })
+        $utils.toastError(formatError(error))
         return jsonify({ list: [] })
     }
 }
@@ -542,6 +680,11 @@ async function getTracks(ext) {
  */
 async function getPlayinfo(ext) {
     ext = argsify(ext)
+    await sendDiagnosticLog('getPlayinfo:start', {
+        hasPlayerUrl: Boolean(ext.playerUrl),
+        hasPlayUrl: Boolean(ext.playUrl),
+        playerUrl: ext.playerUrl || '',
+    })
     try {
         let playUrl = normalizeMediaUrl(ext.playUrl, appConfig.site)
         let referer = ext.referer || (/surrit\.store/i.test(playUrl) ? `${SURRIT_SITE}/` : `${appConfig.site}/`)
@@ -554,21 +697,26 @@ async function getPlayinfo(ext) {
         }
         if (!playUrl) throw new Error('123AV 缺少播放地址')
 
+        const type = /\.m3u8(?:[?#]|$)/i.test(playUrl) ? 'm3u8' : 'mp4'
+        const mediaHeaders = {
+            'User-Agent': UA,
+            Referer: referer,
+            Origin: /^https?:\/\/[^/]+/i.test(referer)
+                ? referer.match(/^https?:\/\/[^/]+/i)[0]
+                : appConfig.site,
+        }
+        const finalPlayUrl = compatiblePlaybackUrl(freshPlaybackUrl(playUrl), referer)
+        await sendDiagnosticLog('getPlayinfo:resolved', { type, playUrl, finalPlayUrl, referer })
+
+        // 不提前请求媒体清单或分片，确保原生播放器拿到的是首次访问状态。
         return jsonify({
-            urls: [playUrl],
-            type: /\.m3u8(?:[?#]|$)/i.test(playUrl) ? 'm3u8' : 'mp4',
-            headers: [
-                {
-                    'User-Agent': UA,
-                    Referer: referer,
-                    Origin: /^https?:\/\/[^/]+/i.test(referer)
-                        ? referer.match(/^https?:\/\/[^/]+/i)[0]
-                        : appConfig.site,
-                },
-            ],
+            urls: [finalPlayUrl],
+            type,
+            headers: [mediaHeaders],
         })
     } catch (error) {
-        $utils.toastError(String(error))
+        await sendDiagnosticLog('getPlayinfo:error', { error: formatError(error) })
+        $utils.toastError(formatError(error))
         throw error
     }
 }
@@ -587,12 +735,13 @@ async function search(ext) {
 
     const url = `${appConfig.site}/cn/search?keyword=${encodeURIComponent(keyword)}&page=${page}`
     try {
-        const html = await requestHtml(url, `${appConfig.site}/cn/`)
+        const html = await requestHtml(url, `${appConfig.site}/cn/`, 'search')
         const list = parseCards(html, url)
+        await sendDiagnosticLog('search:parsed', { keyword, page, count: list.length })
         if (!list.length) throw new Error('123AV 搜索 DOM 未匹配或没有结果')
         return jsonify({ list })
     } catch (error) {
-        $utils.toastError(String(error))
+        $utils.toastError(formatError(error))
         return jsonify({ list: [] })
     }
 }

@@ -1,0 +1,9 @@
+#!name=123AV HLS 兼容
+#!desc=为 123AV 动态 HLS 补齐防盗链请求头，并纠正伪装视频分片的响应类型。
+
+[Script]
+123AV HLS 请求头 = type=http-request,pattern=^https:\/\/[a-fA-F0-9]{8}\.[^\/]+\.(store|site|space)\/blah4\/,requires-body=0,script-path=https://raw.githubusercontent.com/Blessedly/xptv-fix/main/shadowrocket/123av-hls.js
+123AV HLS 响应类型 = type=http-response,pattern=^https:\/\/[a-fA-F0-9]{8}\.[^\/]+\.(store|site|space)\/blah4\/,requires-body=0,script-path=https://raw.githubusercontent.com/Blessedly/xptv-fix/main/shadowrocket/123av-hls.js
+
+[MITM]
+hostname = %APPEND% *.store, *.site, *.space
