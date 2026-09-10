@@ -4,7 +4,7 @@ const UA =
     'Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1'
 
 const appConfig = {
-    ver: 2026090902,
+    ver: 2026091001,
     title: '123AV-修改',
     site: 'https://123av.com',
     tabs: [
@@ -143,9 +143,11 @@ function parseCards(html, pageUrl) {
 
     $(selectors).each((_, element) => {
         const item = $(element)
-        const link = item
-            .find('.card__title .card__link[href], .card__link[href], .title a[href], a[href*="/video/"], a[href]')
-            .first()
+        // 不能把标题与封面选择器写在同一个逗号列表后直接 first()：Cheerio 会按 DOM 顺序返回封面链接。
+        let link = item.find('.card__title .card__link[href]').first()
+        if (!link.length) link = item.find('.title a[href]').first()
+        if (!link.length) link = item.find('a[href*="/video/"], a[href*="/v/"]').first()
+        if (!link.length) link = item.find('a[href]').first()
         const href = absoluteUrl(link.attr('href'), pageUrl)
         if (!href || !/^https?:\/\/(?:www\.)?123av\.com\//i.test(href) || seen[href]) return
 
@@ -408,6 +410,8 @@ async function resolveJavPlayer(playerUrl) {
             Accept: 'application/json',
             Referer: playerUrl,
             Origin: origin,
+            'Cache-Control': 'no-cache',
+            Pragma: 'no-cache',
         },
         timeout: 15000,
     })
@@ -473,20 +477,15 @@ async function getTracks(ext) {
         const $ = cheerio.load(html)
         const episodes = extractPlayerEpisodes(html)
         for (let index = 0; index < episodes.length; index++) {
-            try {
-                const result = await resolveJavPlayer(episodes[index].url)
-                tracks.push({
-                    name: episodes[index].name,
-                    pan: '',
-                    ext: {
-                        playUrl: result.playUrl,
-                        subtitle: result.subtitle,
-                        referer: result.referer,
-                    },
-                })
-            } catch (error) {
-                $print(`123AV 第 ${index + 1} 条 javplayer 线路解析失败：${error}`)
-            }
+            // 详情阶段只保存播放器入口；真正点击播放时再获取媒体，避免 XPTV 缓存过期 M3U8。
+            tracks.push({
+                name: episodes[index].name,
+                pan: '',
+                ext: {
+                    playerUrl: episodes[index].url,
+                    detailUrl,
+                },
+            })
         }
 
         // 保留旧 surrit.store 解密线路作为过渡兼容，只有旧详情页仍存在 data-url 时才会执行。
@@ -543,21 +542,35 @@ async function getTracks(ext) {
  */
 async function getPlayinfo(ext) {
     ext = argsify(ext)
-    const playUrl = normalizeMediaUrl(ext.playUrl, appConfig.site)
-    if (!playUrl) throw new Error('123AV 缺少播放地址')
+    try {
+        let playUrl = normalizeMediaUrl(ext.playUrl, appConfig.site)
+        let referer = ext.referer || (/surrit\.store/i.test(playUrl) ? `${SURRIT_SITE}/` : `${appConfig.site}/`)
 
-    const referer = ext.referer || (/surrit\.store/i.test(playUrl) ? `${SURRIT_SITE}/` : `${appConfig.site}/`)
-    return jsonify({
-        urls: [playUrl],
-        type: /\.m3u8(?:[?#]|$)/i.test(playUrl) ? 'm3u8' : 'mp4',
-        headers: [
-            {
-                'User-Agent': UA,
-                Referer: referer,
-                Origin: /^https?:\/\/[^/]+/i.test(referer) ? referer.match(/^https?:\/\/[^/]+/i)[0] : appConfig.site,
-            },
-        ],
-    })
+        if (ext.playerUrl) {
+            // 每次点击播放都重新调用 stream 接口，防止复用已经失效的媒体签名。
+            const result = await resolveJavPlayer(normalizeMediaUrl(ext.playerUrl, appConfig.site))
+            playUrl = result.playUrl
+            referer = result.referer
+        }
+        if (!playUrl) throw new Error('123AV 缺少播放地址')
+
+        return jsonify({
+            urls: [playUrl],
+            type: /\.m3u8(?:[?#]|$)/i.test(playUrl) ? 'm3u8' : 'mp4',
+            headers: [
+                {
+                    'User-Agent': UA,
+                    Referer: referer,
+                    Origin: /^https?:\/\/[^/]+/i.test(referer)
+                        ? referer.match(/^https?:\/\/[^/]+/i)[0]
+                        : appConfig.site,
+                },
+            ],
+        })
+    } catch (error) {
+        $utils.toastError(String(error))
+        throw error
+    }
 }
 
 /**
