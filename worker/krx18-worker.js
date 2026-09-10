@@ -3,16 +3,22 @@ const UA =
     'Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1'
 
 /**
- * 生成允许 XPTV 调用的跨域响应头。
+ * 生成允许 XPTV 调用的跨域响应头，并在已知时标明响应长度。
+ *
+ * @param {string} contentType 响应内容类型
+ * @param {number} contentLength UTF-8 响应字节数
+ * @returns {Record<string, string>} 响应头
  */
-function createCorsHeaders(contentType) {
-    return {
+function createCorsHeaders(contentType, contentLength = 0) {
+    const headers = {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Headers': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Methods': 'GET, HEAD, POST, OPTIONS',
         'Cache-Control': 'no-store',
         'Content-Type': contentType,
     }
+    if (contentLength > 0) headers['Content-Length'] = String(contentLength)
+    return headers
 }
 
 /**
@@ -76,10 +82,14 @@ function parsePlaylistUrl(value) {
 }
 
 /**
- * 将 HLS 清单中的相对媒体地址转换为手机可直连的完整地址。
+ * 将 HLS 清单中的相对媒体地址转换为手机可直连的完整地址，并补齐 VOD 元数据。
+ *
+ * @param {string} text 上游 HLS 清单
+ * @param {string} sourceUrl 上游清单地址
+ * @returns {string} 适合播放器稳定识别的 HLS 清单
  */
 function absolutizePlaylist(text, sourceUrl) {
-    return String(text || '')
+    const lines = String(text || '')
         .split(/\r?\n/)
         .map((line) => {
             const value = line.trim()
@@ -91,7 +101,23 @@ function absolutizePlaylist(text, sourceUrl) {
                 return `URI=${quote}${new URL(uri, sourceUrl).href}${quote}`
             })
         })
-        .join('\n')
+
+    // 只有包含 EXTINF 的媒体清单才补 VOD 标签，避免破坏主清单的多码率结构。
+    const isMediaPlaylist = lines.some((line) => /^#EXTINF:/i.test(line.trim()))
+    if (isMediaPlaylist) {
+        let insertAt = lines[0] && lines[0].trim() === '#EXTM3U' ? 1 : 0
+        if (!lines.some((line) => /^#EXT-X-PLAYLIST-TYPE:/i.test(line.trim()))) {
+            lines.splice(insertAt, 0, '#EXT-X-PLAYLIST-TYPE:VOD')
+            insertAt += 1
+        }
+        if (!lines.some((line) => /^#EXT-X-MEDIA-SEQUENCE:/i.test(line.trim()))) {
+            lines.splice(insertAt, 0, '#EXT-X-MEDIA-SEQUENCE:0')
+        }
+        if (!lines.some((line) => /^#EXT-X-ENDLIST\s*$/i.test(line.trim()))) {
+            lines.push('#EXT-X-ENDLIST')
+        }
+    }
+    return lines.join('\n')
 }
 
 /**
@@ -175,9 +201,11 @@ async function handlePlaylist(requestUrl) {
         redirect: 'follow',
     })
     const text = await upstream.text()
-    return new Response(upstream.ok ? absolutizePlaylist(text, targetUrl.href) : text, {
+    const output = upstream.ok ? absolutizePlaylist(text, targetUrl.href) : text
+    const contentLength = new TextEncoder().encode(output).byteLength
+    return new Response(output, {
         status: upstream.status,
-        headers: createCorsHeaders('application/vnd.apple.mpegurl; charset=utf-8'),
+        headers: createCorsHeaders('application/vnd.apple.mpegurl; charset=utf-8', contentLength),
     })
 }
 
@@ -200,7 +228,7 @@ export default {
         if (request.method === 'POST' && url.pathname === '/play-api') {
             return handlePlayApi(request, url)
         }
-        if (request.method === 'GET' && url.pathname === '/playlist') {
+        if (request.method === 'GET' && ['/playlist', '/manifest.m3u8'].includes(url.pathname)) {
             return handlePlaylist(url)
         }
 

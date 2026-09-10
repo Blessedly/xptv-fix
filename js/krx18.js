@@ -16,7 +16,7 @@ const htmlHeaders = {
 const PLAY_PROXY = 'https://krx18-control.blessedlymm.workers.dev'
 
 const appConfig = {
-    ver: 2026090812,
+    ver: 2026091013,
     title: 'KRX18',
     // www.krx18.com 会跳转到该主域名，统一使用跳转后的地址可避免跨域重定向。
     site: 'https://krx18.com',
@@ -87,15 +87,16 @@ function cleanText(text) {
 }
 
 /**
- * 根据代理配置生成只代取 M3U8 文本的播放地址。
+ * 根据代理配置生成带明确 M3U8 后缀且不复用旧缓存的播放地址。
  */
 function getPlayableUrl(url, referer) {
     const playlistUrl = String(url || '').trim()
     const proxy = String(PLAY_PROXY || '').replace(/\/+$/, '')
     if (!playlistUrl || !proxy) return playlistUrl
-    return `${proxy}/playlist?url=${encodeURIComponent(playlistUrl)}&referer=${encodeURIComponent(
+    // 明确的 .m3u8 路径帮助播放器首轮按 HLS 探测，时间戳避免复用错误的短媒体缓存。
+    return `${proxy}/manifest.m3u8?url=${encodeURIComponent(playlistUrl)}&referer=${encodeURIComponent(
         referer || ''
-    )}`
+    )}&_xptv=${Date.now()}`
 }
 
 /**
@@ -592,6 +593,7 @@ async function getPlayinfo(ext) {
             await traceRuntime('getPlayinfoReturn', getOrigin(playableUrl))
             return jsonify({
                 urls: [playableUrl],
+                type: 'm3u8',
                 headers: [
                     {
                         'User-Agent': UA,
