@@ -40,3 +40,4 @@ webpack.config.js
 logs/
 *.log
 .fastRequest
+/debug/
